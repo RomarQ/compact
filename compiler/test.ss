@@ -33509,6 +33509,8 @@ groups than for single tests.
          "    }"
          "  ],"
          "  \"contracts\": ["
+         "  ],"
+         "  \"ledger\": ["
          "  ]"
          "}"))
      ))
@@ -33556,6 +33558,8 @@ groups than for single tests.
          "  \"witnesses\": ["
          "  ],"
          "  \"contracts\": ["
+         "  ],"
+         "  \"ledger\": ["
          "  ]"
          "}"))
      ))
@@ -33657,6 +33661,16 @@ groups than for single tests.
          "    }"
          "  ],"
          "  \"contracts\": ["
+         "  ],"
+         "  \"ledger\": ["
+         "    {"
+         "      \"name\": \"value\","
+         "      \"index\": 1,"
+         "      \"storage\": \"cell\","
+         "      \"type\": {"
+         "        \"type-name\": \"Field\""
+         "      }"
+         "    }"
          "  ]"
          "}"))
      )
@@ -35255,6 +35269,8 @@ groups than for single tests.
         "  \"witnesses\": ["
         "  ],"
         "  \"contracts\": ["
+        "  ],"
+        "  \"ledger\": ["
         "  ]"
         "}"))
     )
