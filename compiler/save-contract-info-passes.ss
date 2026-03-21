@@ -119,15 +119,7 @@
            (unwrap-to-adt type)]
           [else type]))
 
-      ;; Collect external names for a given identifier from the export alist.
-      (define (external-names id export-alist)
-        (fold-right
-          (lambda (a external-name*)
-            (if (eq? (cdr a) id)
-                (cons (symbol->string (car a)) external-name*)
-                external-name*))
-          '()
-          export-alist)))
+      )
 
     (Program : Program (ir) -> Program ()
       [(program ,src (,contract-name* ...) ((,export-name* ,name*) ...) ,pelt* ...)
@@ -203,6 +195,15 @@
            field*))]
       [else field*])
     (exported-circuit : Program-Element (ir circuit* export-alist) -> * (json)
+      (definitions
+        (define (external-names id)
+          (fold-right
+            (lambda (a external-name*)
+              (if (eq? (cdr a) id)
+                  (cons (symbol->string (car a)) external-name*)
+                  external-name*))
+            '()
+            export-alist)))
       [(circuit ,src ,function-name (,arg* ...) ,type ,expr)
        (guard (id-exported? function-name))
        (fold-right
@@ -226,7 +227,7 @@
                  (Type type)))
              circuit*))
          circuit*
-         (external-names function-name export-alist))]
+         (external-names function-name))]
       [else circuit*])
     (Argument : Argument (ir) -> * (json)
       [(,var-name ,type)
