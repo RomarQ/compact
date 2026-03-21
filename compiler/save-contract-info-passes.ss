@@ -309,11 +309,12 @@
              (cons "type" (Type type)))
            (Type type))]
       [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
-       ;; ADT types appear as inner types of Map/List values.
-       ;; Emit the storage kind as the type-name so consumers see "MerkleTree", "Map", etc.
-       (let-values ([(storage _) (adt-name->storage-and-category adt-name)])
+       ;; ADT types appearing as inner types (e.g., Map value type is a MerkleTree).
+       ;; Use the cleaned ADT name as type-name for consistency with other type-name values
+       ;; (Boolean, Struct, Enum, etc. are all PascalCase).
+       (let ([cleaned (symbol->string (clean-adt-name adt-name))])
          (cons
-           (cons "type-name" storage)
+           (cons "type-name" cleaned)
            (serialize-ledger-adt adt-name adt-formal* adt-arg*)))]
       [else (assert cannot-happen)]))
 
