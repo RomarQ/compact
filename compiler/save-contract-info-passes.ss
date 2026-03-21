@@ -63,7 +63,8 @@
         [(List)                   (values "list" 'element)]
         [(MerkleTree)             (values "merkle-tree" 'merkle-tree)]
         [(HistoricMerkleTree)     (values "historic-merkle-tree" 'merkle-tree)]
-        [else                     (values (string-downcase (symbol->string cleaned)) 'unknown)])))
+        [else                     (internal-errorf 'save-contract-info-passes
+                                   "unrecognized ledger ADT kind ~s" cleaned)])))
 
   ;; Helper: extract an ADT-Arg as a JSON value via the Type transformer.
   (define (adt-arg->json arg Type)
@@ -161,19 +162,15 @@
       [else witness*])
     (LedgerField : Program-Element (ir field*) -> * (json)
       [(public-ledger-declaration ,pl-array ,lconstructor)
-       (let ([bindings (filter
-                         (lambda (pb)
-                           (nanopass-case (Lnodisclose Public-Ledger-Binding) pb
-                             [(,src ,ledger-field-name (,path-index* ...) ,type)
-                              (id-exported? ledger-field-name)]))
-                         (flatten-pl-array pl-array))])
+       (let ([bindings (flatten-pl-array pl-array)])
          (append
            (map
              (lambda (pb)
                (nanopass-case (Lnodisclose Public-Ledger-Binding) pb
                  [(,src ,ledger-field-name (,path-index* ...) ,type)
                   (let ([name (symbol->string (id-sym ledger-field-name))]
-                        [index (if (= (length path-index*) 1) (car path-index*) (list->vector path-index*))])
+                        [index (if (= (length path-index*) 1) (car path-index*) (list->vector path-index*))]
+                        [exported (id-exported? ledger-field-name)])
                     ;; Unwrap alias to get to the tadt node
                     (let loop ([t type])
                       (nanopass-case (Lnodisclose Type) t
@@ -183,15 +180,12 @@
                          (append
                            (list
                              (cons "name" name)
-                             (cons "index" index))
+                             (cons "index" index)
+                             (cons "exported" exported))
                            (serialize-ledger-adt adt-name adt-formal* adt-arg* Type))]
                         [else
-                         ;; Non-ADT type -- unexpected for ledger fields, handle gracefully
-                         (list
-                           (cons "name" name)
-                           (cons "index" index)
-                           (cons "storage" "unknown")
-                           (cons "type" (Type t)))])))]))
+                         (internal-errorf 'save-contract-info-passes
+                           "ledger field ~a has non-ADT type" name)])))]))
              bindings)
            field*))]
       [else field*])
