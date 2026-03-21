@@ -15,6 +15,10 @@
 ;;; See the License for the specific language governing permissions and
 ;;; limitations under the License.
 
+;;; Serializes contract metadata to contract-info.json.
+;;; Emits compiler/language/runtime versions, exported circuits with types,
+;;; witnesses, and all ledger fields with storage kind, types, and export status.
+
 (library (save-contract-info-passes)
   (export save-contract-info-passes)
   (import (except (chezscheme) errorf)
@@ -28,91 +32,103 @@
           (runtime-version)
           (pass-helpers))
 
-  ;; Flatten a Public-Ledger-Array tree into a list of Public-Ledger-Binding nodes.
-  ;; The pl-array is a B-tree (for >15 fields) that we flatten to a simple list.
-  (define (flatten-pl-array pl-array)
-    (nanopass-case (Lnodisclose Public-Ledger-Array) pl-array
-      [(public-ledger-array ,pl-array-elt* ...)
-       (apply append (map flatten-pl-array-elt pl-array-elt*))]))
-
-  (define (flatten-pl-array-elt elt)
-    (nanopass-case (Lnodisclose Public-Ledger-Array-Element) elt
-      [,pl-array (flatten-pl-array pl-array)]
-      [,public-binding (list public-binding)]))
-
-  ;; Strip the __compact_ prefix from an ADT name if present and return a clean symbol.
-  ;; In the IR, the Cell ADT is renamed to __compact_Cell by analysis-passes.ss.
-  ;; Other ADTs (Map, Set, Counter, etc.) keep their original names.
-  (define (clean-adt-name adt-name)
-    (let ([s (symbol->string adt-name)])
-      (if (and (> (string-length s) 10)
-               (string=? (substring s 0 10) "__compact_"))
-          (string->symbol (substring s 10 (string-length s)))
-          adt-name)))
-
-  ;; Map an ADT name (possibly __compact_-prefixed) to a canonical storage kind string
-  ;; and a dispatch category symbol for serialize-ledger-adt.
-  ;; Returns (values storage-string category-symbol).
-  (define (classify-adt adt-name)
-    (let ([cleaned (clean-adt-name adt-name)])
-      (case cleaned
-        [(Cell)                   (values "cell" 'cell)]
-        [(Counter)                (values "counter" 'counter)]
-        [(Map)                    (values "map" 'map)]
-        [(Set)                    (values "set" 'element)]
-        [(List)                   (values "list" 'element)]
-        [(MerkleTree)             (values "merkle-tree" 'merkle-tree)]
-        [(HistoricMerkleTree)     (values "historic-merkle-tree" 'merkle-tree)]
-        [else                     (internal-errorf 'save-contract-info-passes
-                                   "unrecognized ledger ADT kind ~s" cleaned)])))
-
-  ;; Helper: extract an ADT-Arg as a JSON value via the Type transformer.
-  (define (adt-arg->json arg Type)
-    (nanopass-case (Lnodisclose Public-Ledger-ADT-Arg) arg
-      [,type (Type type)]
-      [,nat nat]))
-
-  ;; Serialize a tadt (ledger ADT) type to a JSON alist with storage kind and inner types.
-  ;; Returns a list of (key . value) pairs to splice into the ledger field entry.
-  (define (serialize-ledger-adt adt-name adt-formal* adt-arg* Type)
-    (let-values ([(storage category) (classify-adt adt-name)])
-      (case category
-        [(cell)
-         ;; Cell has one type arg: the value type
-         (list
-           (cons "storage" storage)
-           (cons "type" (adt-arg->json (car adt-arg*) Type)))]
-        [(counter)
-         ;; Counter has no type args; always Uint<128> (defined in midnight-ledger.ss)
-         (list
-           (cons "storage" storage)
-           (cons "type"
-             (list
-               (cons "type-name" "Uint")
-               (cons "maxval" (- (expt 2 128) 1)))))]
-        [(map)
-         ;; Map has two args: key type, value type
-         (list
-           (cons "storage" storage)
-           (cons "key-type" (adt-arg->json (car adt-arg*) Type))
-           (cons "value-type" (adt-arg->json (cadr adt-arg*) Type)))]
-        [(element)
-         ;; Set and List both have one type arg: element type
-         (list
-           (cons "storage" storage)
-           (cons "element-type" (adt-arg->json (car adt-arg*) Type)))]
-        [(merkle-tree)
-         ;; MerkleTree/HistoricMerkleTree: first arg is depth (nat), second is element type
-         (list
-           (cons "storage" storage)
-           (cons "depth" (adt-arg->json (car adt-arg*) Type))
-           (cons "element-type" (adt-arg->json (cadr adt-arg*) Type)))]
-        [else
-         ;; Unknown ADT — emit storage name only
-         (list (cons "storage" storage))])))
-
-  ; NB: must come after identify-pure-circuits
+  ;; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir proof-circuit-name*) -> Lnodisclose ()
+    (definitions
+      ;; Flatten a Public-Ledger-Array B-tree into a list of Public-Ledger-Binding nodes.
+      (define (flatten-pl-array pl-array)
+        (nanopass-case (Lnodisclose Public-Ledger-Array) pl-array
+          [(public-ledger-array ,pl-array-elt* ...)
+           (apply append (map flatten-pl-array-elt pl-array-elt*))]))
+
+      (define (flatten-pl-array-elt elt)
+        (nanopass-case (Lnodisclose Public-Ledger-Array-Element) elt
+          [,pl-array (flatten-pl-array pl-array)]
+          [,public-binding (list public-binding)]))
+
+      ;; Strip the __compact_ prefix from an ADT name if present.
+      ;; In the IR, the Cell ADT is renamed to __compact_Cell by analysis-passes.ss.
+      (define (clean-adt-name adt-name)
+        (let ([s (symbol->string adt-name)])
+          (if (and (> (string-length s) 10)
+                   (string=? (substring s 0 10) "__compact_"))
+              (string->symbol (substring s 10 (string-length s)))
+              adt-name)))
+
+      ;; Map an ADT name to a canonical storage kind string and a dispatch category.
+      ;; Returns (values storage-string category-symbol).
+      (define (adt-name->storage-and-category adt-name)
+        (let ([cleaned (clean-adt-name adt-name)])
+          (case cleaned
+            [(Cell)                   (values "cell" 'cell)]
+            [(Counter)                (values "counter" 'counter)]
+            [(Map)                    (values "map" 'map)]
+            [(Set)                    (values "set" 'element)]
+            [(List)                   (values "list" 'element)]
+            [(MerkleTree)             (values "merkle-tree" 'merkle-tree)]
+            [(HistoricMerkleTree)     (values "historic-merkle-tree" 'merkle-tree)]
+            [else                     (internal-errorf 'save-contract-info
+                                       "unrecognized ledger ADT kind ~s" cleaned)])))
+
+      ;; Extract an ADT-Arg as a JSON value via the Type transformer.
+      (define (adt-arg->json arg)
+        (nanopass-case (Lnodisclose Public-Ledger-ADT-Arg) arg
+          [,type (Type type)]
+          [,nat nat]))
+
+      ;; Serialize a tadt (ledger ADT) to JSON alist entries with storage kind and inner types.
+      (define (serialize-ledger-adt adt-name adt-formal* adt-arg*)
+        (let-values ([(storage category) (adt-name->storage-and-category adt-name)])
+          (case category
+            [(cell)
+             ;; Cell has one type arg: the value type
+             (list
+               (cons "storage" storage)
+               (cons "type" (adt-arg->json (car adt-arg*))))]
+            [(counter)
+             ;; Counter has no type args; always Uint<64> (defined in midnight-ledger.ss as Uint64)
+             (list
+               (cons "storage" storage)
+               (cons "type"
+                 (list
+                   (cons "type-name" "Uint")
+                   (cons "maxval" (- (expt 2 64) 1)))))]
+            [(map)
+             ;; Map has two args: key type, value type
+             (list
+               (cons "storage" storage)
+               (cons "key-type" (adt-arg->json (car adt-arg*)))
+               (cons "value-type" (adt-arg->json (cadr adt-arg*))))]
+            [(element)
+             ;; Set and List both have one type arg: element type
+             (list
+               (cons "storage" storage)
+               (cons "element-type" (adt-arg->json (car adt-arg*))))]
+            [(merkle-tree)
+             ;; MerkleTree/HistoricMerkleTree: first arg is depth (nat), second is element type
+             (list
+               (cons "storage" storage)
+               (cons "depth" (adt-arg->json (car adt-arg*)))
+               (cons "element-type" (adt-arg->json (cadr adt-arg*))))]
+            [else (assert cannot-happen)])))
+
+      ;; Unwrap aliases to reach the underlying tadt node for a ledger field.
+      (define (unwrap-to-adt type)
+        (nanopass-case (Lnodisclose Type) type
+          [(talias ,src ,nominal? ,type-name ,type)
+           (unwrap-to-adt type)]
+          [else type]))
+
+      ;; Collect external names for a given identifier from the export alist.
+      (define (external-names id export-alist)
+        (fold-right
+          (lambda (a external-name*)
+            (if (eq? (cdr a) id)
+                (cons (symbol->string (car a)) external-name*)
+                external-name*))
+          '()
+          export-alist)))
+
     (Program : Program (ir) -> Program ()
       [(program ,src (,contract-name* ...) ((,export-name* ,name*) ...) ,pelt* ...)
        (let ([op (get-target-port 'contract-info.json)])
@@ -170,35 +186,23 @@
                  [(,src ,ledger-field-name (,path-index* ...) ,type)
                   (let ([name (symbol->string (id-sym ledger-field-name))]
                         [index (if (= (length path-index*) 1) (car path-index*) (list->vector path-index*))]
-                        [exported (id-exported? ledger-field-name)])
-                    ;; Unwrap alias to get to the tadt node
-                    (let loop ([t type])
-                      (nanopass-case (Lnodisclose Type) t
-                        [(talias ,src ,nominal? ,type-name ,type)
-                         (loop type)]
-                        [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
-                         (append
-                           (list
-                             (cons "name" name)
-                             (cons "index" index)
-                             (cons "exported" exported))
-                           (serialize-ledger-adt adt-name adt-formal* adt-arg* Type))]
-                        [else
-                         (internal-errorf 'save-contract-info-passes
-                           "ledger field ~a has non-ADT type" name)])))]))
+                        [exported (id-exported? ledger-field-name)]
+                        [unwrapped (unwrap-to-adt type)])
+                    (nanopass-case (Lnodisclose Type) unwrapped
+                      [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
+                       (append
+                         (list
+                           (cons "name" name)
+                           (cons "index" index)
+                           (cons "exported" exported))
+                         (serialize-ledger-adt adt-name adt-formal* adt-arg*))]
+                      [else
+                       (internal-errorf 'save-contract-info
+                         "ledger field ~a has non-ADT type" name)]))]))
              bindings)
            field*))]
       [else field*])
     (exported-circuit : Program-Element (ir circuit* export-alist) -> * (json)
-      (definitions
-        (define (external-names id)
-          (fold-right
-            (lambda (a external-name*)
-              (if (eq? (cdr a) id)
-                  (cons (symbol->string (car a)) external-name*)
-                  external-name*))
-            '()
-            export-alist)))
       [(circuit ,src ,function-name (,arg* ...) ,type ,expr)
        (guard (id-exported? function-name))
        (fold-right
@@ -222,7 +226,7 @@
                  (Type type)))
              circuit*))
          circuit*
-         (external-names function-name))]
+         (external-names function-name export-alist))]
       [else circuit*])
     (Argument : Argument (ir) -> * (json)
       [(,var-name ,type)
@@ -304,12 +308,12 @@
              (cons "type" (Type type)))
            (Type type))]
       [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
-       ;; ADT types appear as inner types of Map/List values (e.g., Map<Field, MerkleTree<10, T>>).
+       ;; ADT types appear as inner types of Map/List values.
        ;; Emit the storage kind as the type-name so consumers see "MerkleTree", "Map", etc.
-       (let-values ([(storage _) (classify-adt adt-name)])
+       (let-values ([(storage _) (adt-name->storage-and-category adt-name)])
          (cons
            (cons "type-name" storage)
-           (serialize-ledger-adt adt-name adt-formal* adt-arg* Type)))]
+           (serialize-ledger-adt adt-name adt-formal* adt-arg*)))]
       [else (assert cannot-happen)]))
 
   (define-passes save-contract-info-passes
