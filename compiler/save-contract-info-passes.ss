@@ -28,6 +28,49 @@
           (runtime-version)
           (pass-helpers))
 
+  ;; Strip the __compact_ prefix that analysis passes add to Cell
+  (define (clean-adt-name sym)
+    (let ([s (symbol->string sym)])
+      (if (and (fx>= (string-length s) 10)
+               (string=? (substring s 0 10) "__compact_"))
+          (substring s 10 (string-length s))
+          s)))
+
+  ;; PascalCase ADT name -> kebab-case storage kind
+  (define (adt-name->storage name)
+    (cond
+      [(string=? name "Cell") "cell"]
+      [(string=? name "Counter") "counter"]
+      [(string=? name "Map") "map"]
+      [(string=? name "Set") "set"]
+      [(string=? name "List") "list"]
+      [(string=? name "MerkleTree") "merkle-tree"]
+      [(string=? name "HistoricMerkleTree") "historic-merkle-tree"]
+      [else (internal-errorf 'save-contract-info "unrecognized ledger ADT kind: ~a" name)]))
+
+  ;; Return the type-specific JSON fields for a given ADT kind.
+  ;; type-fn is the Type serializer (passed in so this can live outside define-pass).
+  (define (adt-type-fields clean-name adt-arg* type-fn)
+    (define (serialize-arg arg)
+      (nanopass-case (Lnodisclose Public-Ledger-ADT-Arg) arg
+        [,nat nat]
+        [,type (type-fn type)]))
+    (cond
+      [(string=? clean-name "Cell")
+       (list (cons "type" (serialize-arg (car adt-arg*))))]
+      [(string=? clean-name "Counter")
+       (list (cons "type" (list (cons "type-name" "Uint")
+                                (cons "maxval" 18446744073709551615))))]
+      [(string=? clean-name "Map")
+       (list (cons "key-type" (serialize-arg (car adt-arg*)))
+             (cons "value-type" (serialize-arg (cadr adt-arg*))))]
+      [(or (string=? clean-name "Set") (string=? clean-name "List"))
+       (list (cons "element-type" (serialize-arg (car adt-arg*))))]
+      [(or (string=? clean-name "MerkleTree") (string=? clean-name "HistoricMerkleTree"))
+       (list (cons "depth" (serialize-arg (car adt-arg*)))
+             (cons "element-type" (serialize-arg (cadr adt-arg*))))]
+      [else (internal-errorf 'save-contract-info "unrecognized ledger ADT kind: ~a" clean-name)]))
+
   ; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir proof-circuit-name*) -> Lnodisclose ()
     (Program : Program (ir) -> Program ()
@@ -57,7 +100,10 @@
                (list->vector (fold-right Witness '() pelt*)))
              (cons
                "contracts"
-               (list->vector (map symbol->string contract-name*))))))
+               (list->vector (map symbol->string contract-name*)))
+             (cons
+               "ledger"
+               (list->vector (fold-right LedgerField '() pelt*))))))
        ir])
     (Witness : Program-Element (ir witness*) -> * (json)
       [(witness ,src ,function-name (,arg* ...) ,type)
@@ -74,6 +120,50 @@
              (Type type)))
          witness*)]
       [else witness*])
+    (LedgerField : Program-Element (ir field*) -> * (json)
+      (definitions
+        (define (collect-bindings pl-array)
+          (let f ([pl-array pl-array] [pb* '()])
+            (nanopass-case (Lnodisclose Public-Ledger-Array) pl-array
+              [(public-ledger-array ,pl-array-elt* ...)
+               (fold-right
+                 (lambda (elt pb*)
+                   (nanopass-case (Lnodisclose Public-Ledger-Array-Element) elt
+                     [,pl-array (f pl-array pb*)]
+                     [,public-binding (cons public-binding pb*)]))
+                 pb*
+                 pl-array-elt*)])))
+        (define (unwrap-alias type)
+          (nanopass-case (Lnodisclose Type) type
+            [(talias ,src ,nominal? ,type-name ,type) (unwrap-alias type)]
+            [else type]))
+        (define (serialize-binding pb)
+          (nanopass-case (Lnodisclose Public-Ledger-Binding) pb
+            [(,src ,ledger-field-name (,path-index* ...) ,type)
+             (let ([unwrapped (unwrap-alias type)])
+               (nanopass-case (Lnodisclose Type) unwrapped
+                 [(tadt ,src^ ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
+                  (let ([clean-name (clean-adt-name adt-name)])
+                    (append
+                      (list
+                        (cons "name" (symbol->string (id-sym ledger-field-name)))
+                        (cons "index"
+                          (if (= (length path-index*) 1)
+                              (car path-index*)
+                              (list->vector path-index*)))
+                        (cons "exported" (id-exported? ledger-field-name))
+                        (cons "storage" (adt-name->storage clean-name)))
+                      (adt-type-fields clean-name adt-arg* Type)))]
+                 [else
+                  (internal-errorf 'save-contract-info
+                    "ledger field ~a: type after alias unwrapping is not an ADT"
+                    (symbol->string (id-sym ledger-field-name)))]))])))
+      [(public-ledger-declaration ,pl-array ,lconstructor)
+       (fold-right
+         (lambda (pb field*) (cons (serialize-binding pb) field*))
+         field*
+         (collect-bindings pl-array))]
+      [else field*])
     (exported-circuit : Program-Element (ir circuit* export-alist) -> * (json)
       (definitions
         (define (external-names id)
@@ -181,6 +271,10 @@
          (cons
            "elements"
            (list->vector (map symbol->string (cons elt-name elt-name*)))))]
+      [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
+       (let ([clean-name (clean-adt-name adt-name)])
+         (cons (cons "type-name" clean-name)
+               (adt-type-fields clean-name adt-arg* Type)))]
       [(talias ,src ,nominal? ,type-name ,type)
        (if nominal?
            (list
