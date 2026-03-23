@@ -213,6 +213,7 @@
       (return src)                       => (return (tuple))
       (const src cbinding cbinding* ...) => (const (cbinding 0 cbinding* ...))
       (if src expr stmt1 stmt2)          => (if expr 3 stmt1 3 stmt2)
+      (for src var-name tsize0 tsize1 stmt) => (for var-name tsize0 tsize1 #f stmt)
       (for src var-name expr stmt)       => (for var-name expr #f stmt)
       blck
       )
@@ -366,11 +367,13 @@
          (return src)
          (= src var-name type expr)
          (if src expr stmt1 stmt2)
+         (for src var-name tsize0 tsize1 stmt)
          (for src var-name expr stmt)
          (seq src stmt* ...)
          blck))
     (Expression (expr index)
       (+ (let* src ([local* expr*] ...) expr)    => (let* ([bracket local* 0 expr*] 0 ...) #f expr)
+         (for src var-name tsize0 tsize1 expr2)  => (for var-name tsize0 tsize1 #f expr2)
          (for src var-name expr1 expr2)          => (for var-name expr1 #f expr2)
          (block src (var-name* ...) expr)        => (block (var-name* 0 ...) #f expr)
          (return src expr)                       => expr
@@ -404,7 +407,7 @@
     (Program-Element (pelt)
       (+ ndecl
          adt-defn
-         circuit-alias-defn))
+         fixup-alias-defn))
     (Native-Declaration (ndecl)
       (+ (native src exported? function-name native-entry (type-param* ...) (arg* ...) type) =>
            (native function-name (type-param* ...) (arg* 0 ...) 4 type)))
@@ -424,9 +427,9 @@
          (ledger-op-class nat nat^)))
     (ADT-Op-Condition (adt-op-cond)
       (+ (= tvar-name type)))
-    (Circuit-Alias-Definition (circuit-alias-defn)
-      ; (circuit-alias alias-name actual-name)
-      (+ (circuit-alias function-name^ function-name)))
+    (Fixup-Alias-Definition (fixup-alias-defn)
+      ; (fixup-alias alias-name actual-name)
+      (+ (fixup-alias function-name^ function-name)))
     )
 
   (module (id-counter make-source-id make-temp-id id? id-src id-sym id-uniq id-refcount id-refcount-set! id-temp? id-exported? id-exported?-set! id-pure? id-pure?-set! id-sealed? id-sealed?-set! id-prefix)
@@ -493,12 +496,12 @@
          enumdef
          tdefn
          adt-defn
-         circuit-alias-defn)
+         fixup-alias-defn)
       (+ export-tdefn))
     (ADT-Definition (adt-defn)
       (- (define-adt src exported? adt-name (type-param* ...) vm-expr (adt-op* ...) (adt-rt-op* ...))))
-    (Circuit-Alias-Definition (circuit-alias-defn)
-      (- (circuit-alias function-name^ function-name)))
+    (Fixup-Alias-Definition (fixup-alias-defn)
+      (- (fixup-alias function-name^ function-name)))
     (Ledger-Declaration (ldecl)
       (- (public-ledger-declaration src exported? sealed? ledger-field-name type))
       (+ (public-ledger-declaration src ledger-field-name type) =>
@@ -561,7 +564,8 @@
     (Expression (expr index)
       (- (block src (var-name* ...) expr)
          (new src tref new-field* ...)
-         (tuple-slice src expr index tsize))
+         (tuple-slice src expr index tsize)
+         (for src var-name tsize0 tsize1 expr2))
       (+ (ledger-ref src ledger-field-name) => ledger-field-name
          (new src type new-field* ...)      => (new type #f new-field* ...)
          (enum-ref src type elt-name)       => (enum-ref type elt-name)
@@ -569,7 +573,7 @@
     (Function (fun)
       (- (fref src function-name)
          (fref src function-name (targ* ...)))
-      (+ (fref src symbolic-function-name (([symbolic-function-name** function-name**] ...) ...)
+      (+ (fref src symbolic-function-name ((function-name** ...) ...)
                (generic-value* ...)
                ((src* generic-kind** ...) ...)) =>
            (fref ((function-name** ...) ...))))
@@ -1000,6 +1004,7 @@
       (assert src test mesg)            => (assert test #f mesg))
     (Rhs (rhs)
       triv
+      (default type)
       (+ mbits triv1 triv2)
       (- mbits triv1 triv2)
       (* mbits triv1 triv2)
@@ -1024,7 +1029,6 @@
       (downcast-unsigned src test nat triv)   => (downcast-unsigned test nat triv))
     (Triv (triv test)
       var-name
-      (default type)
       (quote datum)                          => datum
       )
     (Tuple-Argument (tuple-arg)
@@ -1082,6 +1086,7 @@
          (= var-name single)          =>  (= var-name 2 single)))
     (Rhs (rhs)
       (- triv
+         (default type)
          (+ mbits triv1 triv2)
          (- mbits triv1 triv2)
          (* mbits triv1 triv2)
@@ -1115,8 +1120,8 @@
          (vector->bytes triv triv* ...)          => (vector->bytes triv triv* ...) ; result holds one field's worth of bytes
          (downcast-unsigned src test nat triv)   => (downcast-unsigned test nat triv)))
     (Multiple (multiple)
-      (+ (call src test function-name triv* ...) =>
-           (call test function-name #f triv* ...)
+      (+ (call src test function-name triv* ...) => (call test function-name #f triv* ...)
+         (default opaque-type)
          (field->bytes src test len triv)        => (field->bytes test len #f triv)
          (bytes->vector triv)                    => (bytes->vector #f triv) ; triv holds one field's worth of bytes
          (public-ledger src test ledger-field-name (maybe sugar) (path-elt* ...) src^ adt-op triv* ...) =>
@@ -1124,8 +1129,7 @@
          (contract-call src test elt-name (triv primitive-type) triv* ...) =>
            (contract-call test elt-name 4 (triv primitive-type) #f triv* ...)))
     (Triv (triv test)
-      (- (quote datum)
-         (default type))
+      (- (quote datum))
       (+ nat))
     (Tuple-Argument (tuple-arg)
       (- (single src triv)

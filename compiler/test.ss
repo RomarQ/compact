@@ -1476,7 +1476,7 @@ groups than for single tests.
             (const ([q (tundeclared) (new (type-ref S) (x 3) (y 4))]))
             (const ([q (tundeclared) (new (type-ref S) (x 3) (y 4))]))
             (const ([q (tundeclared) (new (type-ref S) (x 3) (y 4))]))
-            (for x (tuple 3 4 5 6)
+            (for x 3 7
               (block
                 (assert (seq (call bar (if #t x q)) (!= x 1)) "oops")))
             (return (tuple (tuple q (new (type-ref S) (x 5) (y 6)))))))
@@ -1633,7 +1633,7 @@ groups than for single tests.
           ciphertexts
           (topaque "Uint8Array"))
         (constructor ([state (tfield)])
-          (block (for i (tuple) (+ state 1))))
+          (block (for i 3 3 (+ state 1))))
         (circuit #f #f foosbar () ()
              (ttuple)
           (block (for i (tuple 3 2 1) (+ i 1))))
@@ -3674,13 +3674,6 @@ groups than for single tests.
       "import CompactStandardLibrary;"
       "ledger A: Map<Field, Field>;"
       "module M2 {"
-      " // For now, at least, choosing not to warn about existing bindings for new"
-      " // names since doing so in a way that makes sense, particularly in the face"
-      " // of function overloading is complicated and expensive.  So no error for"
-      " // the following even though it shadows the new standard library binding for"
-      " // persistentHash, and no error for the refererence to persistent_hash below"
-      " // even though renaming it will have the effect of changing it to a reference"
-      " // to the local rather than standard-library binding"
       "  circuit persistentHash<a>(x: a): Bytes<32> { return default<Bytes<32>>; }"
       "  export circuit public_key(sk: Bytes<32>): Bytes<32> {"
       "    return persistent_hash<Vector<2, Bytes<32>>>([pad(32, 'welcome:pk:'), sk]);"
@@ -3689,7 +3682,7 @@ groups than for single tests.
       )
     (warning
       message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 11 char 3" "existing binding of ~s may lead to unintended shadowing of renamed standard-library circuit ~:*~s" (persistentHash)))
+      irritants: '("testfile.compact line 6 char 12" "not renaming reference of ~s to ~s because ~1:*~s has other bindings in scope" (persistent_hash persistentHash)))
     (output-file "compiler/testdir/fixup/testfile.compact"
       '(
         "import CompactStandardLibrary;"
@@ -3697,18 +3690,11 @@ groups than for single tests.
         "ledger A: Map<Field, Field>;"
         ""
         "module M2 {"
-        "  // For now, at least, choosing not to warn about existing bindings for new"
-        "  // names since doing so in a way that makes sense, particularly in the face"
-        "  // of function overloading is complicated and expensive.  So no error for"
-        "  // the following even though it shadows the new standard library binding for"
-        "  // persistentHash, and no error for the refererence to persistent_hash below"
-        "  // even though renaming it will have the effect of changing it to a reference"
-        "  // to the local rather than standard-library binding"
         "  circuit persistentHash<a>(x: a): Bytes<32> {"
         "    return default<Bytes<32>>;"
         "  }"
         "  export circuit public_key(sk: Bytes<32>): Bytes<32> {"
-        "    return persistentHash<Vector<2, Bytes<32>>>([pad(32, 'welcome:pk:'), sk]);"
+        "    return persistent_hash<Vector<2, Bytes<32>>>([pad(32, 'welcome:pk:'), sk]);"
         "  }"
         "}"))
     (returns
@@ -3725,7 +3711,7 @@ groups than for single tests.
                (tbytes 32)
             (block
               (return
-                (call (fref persistentHash (tvector 2 (tbytes 32)))
+                (call (fref persistent_hash (tvector 2 (tbytes 32)))
                   (tuple
                     #vu8(119 101 108 99 111 109 101 58 112 107 58 0 0 0 0 0 0 0
                          0 0 0 0 0 0 0 0 0 0 0 0 0 0)
@@ -3768,6 +3754,9 @@ groups than for single tests.
       "  }"
       "}"
       )
+    (warning
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 6 char 12" "not renaming reference of ~s to ~s because ~2:*~s has other bindings in scope" (persistent_hash persistentHash)))
     (output-file "compiler/testdir/fixup/testfile.compact"
       '(
         "import CompactStandardLibrary;"
@@ -3847,6 +3836,276 @@ groups than for single tests.
         (circuit #t #f B () ([x (tunsigned 0 8)])
              (tfield)
           (block (return (call (fref A 12) x))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const NativePoint = nativePointX(x), CurvePoint = NativePointY(x);"
+      "  return constructNativePoint(CurvePoint, NativePoint);"
+      "}"
+      )
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary;"
+        ""
+        "export circuit foo(x: JubjubPoint): JubjubPoint {"
+        "  const NativePoint = jubjubPointX(x), CurvePoint = jubjubPointY(x);"
+        "  return constructJubjubPoint(CurvePoint, NativePoint);"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "")
+        (circuit #t #f foo () ([x (type-ref JubjubPoint)])
+             (type-ref JubjubPoint)
+          (block
+            (const ([NativePoint (tundeclared) (call jubjubPointX x)]
+                    [CurvePoint (tundeclared) (call jubjubPointY x)]))
+            (return
+              (call constructJubjubPoint CurvePoint NativePoint))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const std$NativePoint = std$nativePointX(x), std$CurvePoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(std$CurvePoint, std$NativePoint);"
+      "}"
+      )
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary prefix std$;"
+        ""
+        "export circuit foo(x: std$JubjubPoint): std$JubjubPoint {"
+        "  const std$NativePoint = std$jubjubPointX(x), std$CurvePoint = std$jubjubPointY(x);"
+        "  return std$constructJubjubPoint(std$CurvePoint, std$NativePoint);"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "std$")
+        (circuit #t #f foo () ([x (type-ref std$JubjubPoint)])
+             (type-ref std$JubjubPoint)
+          (block
+            (const ([std$NativePoint (tundeclared) (call std$jubjubPointX x)]
+                    [std$CurvePoint (tundeclared) (call std$jubjubPointY x)]))
+            (return
+              (call std$constructJubjubPoint std$CurvePoint std$NativePoint))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const NativePoint = nativePointX(x), CurvePoint = NativePointY(x);"
+      "  const JubjubPoint = NativePoint;"
+      "  return constructNativePoint(CurvePoint, JubjubPoint);"
+      "}"
+      )
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary;"
+        ""
+        "export circuit foo(x: JubjubPoint): JubjubPoint {"
+        "  const NativePoint = jubjubPointX(x), CurvePoint = jubjubPointY(x);"
+        "  const JubjubPoint = NativePoint;"
+        "  return constructJubjubPoint(CurvePoint, JubjubPoint);"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "")
+        (circuit #t #f foo () ([x (type-ref JubjubPoint)])
+             (type-ref JubjubPoint)
+          (block
+            (const ([NativePoint (tundeclared) (call jubjubPointX x)]
+                    [CurvePoint (tundeclared) (call jubjubPointY x)]))
+            (const ([JubjubPoint (tundeclared) NativePoint]))
+            (return
+              (call constructJubjubPoint CurvePoint JubjubPoint))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const JubjubPoint = NativePointY(x);"
+      "  return constructNativePoint(JubjubPoint, ((x: NativePoint) => nativePointX(x))(x));"
+      "}"
+      )
+    (warning
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 49" "not renaming reference of ~s to ~s because this would cause the reference to be captured by an existing local binding for ~:*~s" (NativePoint JubjubPoint)))
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary;"
+        ""
+        "export circuit foo(x: JubjubPoint): JubjubPoint {"
+        "  const JubjubPoint = jubjubPointY(x);"
+        "  return constructJubjubPoint(JubjubPoint, ((x: NativePoint) => jubjubPointX(x))(x));"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "")
+        (circuit #t #f foo () ([x (type-ref JubjubPoint)])
+             (type-ref JubjubPoint)
+          (block
+            (const ([JubjubPoint (tundeclared) (call jubjubPointY x)]))
+            (return
+              (call constructJubjubPoint
+                JubjubPoint
+                (call (circuit ([x (type-ref NativePoint)])
+                           (tundeclared)
+                        (block (return (call jubjubPointX x))))
+                  x)))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const constructJubjubPoint = NativePointY(x);"
+      "  return constructNativePoint(constructJubjubPoint, ((x: NativePoint) => nativePointX(x))(x));"
+      "}"
+      )
+    (warning
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "not renaming reference of ~s to ~s because ~1:*~s has other bindings in scope" (constructNativePoint constructJubjubPoint)))
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary;"
+        ""
+        "export circuit foo(x: JubjubPoint): JubjubPoint {"
+        "  const constructJubjubPoint = jubjubPointY(x);"
+        "  return constructNativePoint(constructJubjubPoint, ((x: JubjubPoint) => jubjubPointX(x))(x));"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "")
+        (circuit #t #f foo () ([x (type-ref JubjubPoint)])
+             (type-ref JubjubPoint)
+          (block
+            (const ([constructJubjubPoint (tundeclared) (call jubjubPointY x)]))
+            (return
+              (call constructNativePoint
+                constructJubjubPoint
+                (call (circuit ([x (type-ref JubjubPoint)])
+                           (tundeclared)
+                        (block (return (call jubjubPointX x))))
+                  x)))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const std$JubjubPoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(std$JubjubPoint, ((x: std$NativePoint) => std$nativePointX(x))(x));"
+      "}"
+      )
+    (warning
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 57" "not renaming reference of ~s to ~s because this would cause the reference to be captured by an existing local binding for ~:*~s" (std$NativePoint std$JubjubPoint)))
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary prefix std$;"
+        ""
+        "export circuit foo(x: std$JubjubPoint): std$JubjubPoint {"
+        "  const std$JubjubPoint = std$jubjubPointY(x);"
+        "  return std$constructJubjubPoint(std$JubjubPoint, ((x: std$NativePoint) => std$jubjubPointX(x))(x));"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "std$")
+        (circuit #t #f foo () ([x (type-ref std$JubjubPoint)])
+             (type-ref std$JubjubPoint)
+          (block
+            (const ([std$JubjubPoint (tundeclared) (call std$jubjubPointY x)]))
+            (return
+              (call std$constructJubjubPoint
+                std$JubjubPoint
+                (call (circuit ([x (type-ref std$NativePoint)])
+                           (tundeclared)
+                        (block (return (call std$jubjubPointX x))))
+                  x)))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const JubjubPoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(JubjubPoint, ((x: std$NativePoint) => std$nativePointX(x))(x));"
+      "}"
+      )
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary prefix std$;"
+        ""
+        "export circuit foo(x: std$JubjubPoint): std$JubjubPoint {"
+        "  const JubjubPoint = std$jubjubPointY(x);"
+        "  return std$constructJubjubPoint(JubjubPoint, ((x: std$JubjubPoint) => std$jubjubPointX(x))(x));"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "std$")
+        (circuit #t #f foo () ([x (type-ref std$JubjubPoint)])
+             (type-ref std$JubjubPoint)
+          (block
+            (const ([JubjubPoint (tundeclared) (call std$jubjubPointY x)]))
+            (return
+              (call std$constructJubjubPoint
+                JubjubPoint
+                (call (circuit ([x (type-ref std$JubjubPoint)])
+                           (tundeclared)
+                        (block (return (call std$jubjubPointX x))))
+                  x)))))))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "circuit foo<T>(x: T): CurvePoint {"
+      "  const a = nativePointX(x), b = NativePointY(x);"
+      "  return constructNativePoint(a, b);"
+      "}"
+      "circuit bar(x: NativePoint): CurvePoint {"
+      "  return foo<NativePoint>(x);"
+      "}"
+      )
+    (output-file "compiler/testdir/fixup/testfile.compact"
+      '(
+        "import CompactStandardLibrary;"
+        ""
+        "circuit foo<T>(x: T): JubjubPoint {"
+        "  const a = jubjubPointX(x), b = jubjubPointY(x);"
+        "  return constructJubjubPoint(a, b);"
+        "}"
+        ""
+        "circuit bar(x: JubjubPoint): JubjubPoint {"
+        "  return foo<JubjubPoint>(x);"
+        "}"))
+    (returns
+      (program
+        (import CompactStandardLibrary () "")
+        (circuit #f #f foo (T) ([x (type-ref T)])
+             (type-ref JubjubPoint)
+          (block
+            (const ([a (tundeclared) (call jubjubPointX x)]
+                    [b (tundeclared) (call jubjubPointY x)]))
+            (return (call constructJubjubPoint a b))))
+        (circuit #f #f bar () ([x (type-ref JubjubPoint)])
+             (type-ref JubjubPoint)
+          (block
+            (return (call (fref foo (type-ref JubjubPoint)) x))))))
     )
 )
 
@@ -4113,7 +4372,7 @@ groups than for single tests.
           ciphertexts
           (topaque "Uint8Array"))
         (constructor ([state (tfield)])
-          (block (for i (tuple) (+ state 1))))
+          (block (for i 3 3 (+ state 1))))
         (circuit #f #f foosbar () ()
              (ttuple)
           (block (for i (tuple 3 2 1) (+ i 1))))
@@ -5419,18 +5678,7 @@ groups than for single tests.
       (program
         (circuit #t #f foo () ()
              (ttuple)
-          (block (for i (tuple) (+ i 1))))))
-    )
-
-  (test
-    '(
-      "export circuit foo(): [] {"
-      "  for (const i of 4..3) i + 1;"
-      "}"
-      )
-    (oops
-      message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 2 char 3" "end bound ~d is less than start bound ~s" (3 4)))
+          (block (for i 3 3 (+ i 1))))))
     )
 
   (test
@@ -5444,88 +5692,8 @@ groups than for single tests.
         (circuit #t #f foo () ()
              (ttuple)
           (block
-            (for i (tuple 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
-                    21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38
-                    39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56
-                    57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74
-                    75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92
-                    93 94 95 96 97 98 99 100 101 102 103 104 105 106 107
-                    108 109 110 111 112 113 114 115 116 117 118 119 120 121
-                    122 123 124 125 126 127 128 129 130 131 132 133 134 135
-                    136 137 138 139 140 141 142 143 144 145 146 147 148 149
-                    150 151 152 153 154 155 156 157 158 159 160 161 162 163
-                    164 165 166 167 168 169 170 171 172 173 174 175 176 177
-                    178 179 180 181 182 183 184 185 186 187 188 189 190 191
-                    192 193 194 195 196 197 198 199 200 201 202 203 204 205
-                    206 207 208 209 210 211 212 213 214 215 216 217 218 219
-                    220 221 222 223 224 225 226 227 228 229 230 231 232 233
-                    234 235 236 237 238 239 240 241 242 243 244 245 246 247
-                    248 249 250 251 252 253 254 255 256 257 258 259 260 261
-                    262 263 264 265 266 267 268 269 270 271 272 273 274 275
-                    276 277 278 279 280 281 282 283 284 285 286 287 288 289
-                    290 291 292 293 294 295 296 297 298 299 300 301 302 303
-                    304 305 306 307 308 309 310 311 312 313 314 315 316 317
-                    318 319 320 321 322 323 324 325 326 327 328 329 330 331
-                    332 333 334 335 336 337 338 339 340 341 342 343 344 345
-                    346 347 348 349 350 351 352 353 354 355 356 357 358 359
-                    360 361 362 363 364 365 366 367 368 369 370 371 372 373
-                    374 375 376 377 378 379 380 381 382 383 384 385 386 387
-                    388 389 390 391 392 393 394 395 396 397 398 399 400 401
-                    402 403 404 405 406 407 408 409 410 411 412 413 414 415
-                    416 417 418 419 420 421 422 423 424 425 426 427 428 429
-                    430 431 432 433 434 435 436 437 438 439 440 441 442 443
-                    444 445 446 447 448 449 450 451 452 453 454 455 456 457
-                    458 459 460 461 462 463 464 465 466 467 468 469 470 471
-                    472 473 474 475 476 477 478 479 480 481 482 483 484 485
-                    486 487 488 489 490 491 492 493 494 495 496 497 498 499
-                    500 501 502 503 504 505 506 507 508 509 510 511 512 513
-                    514 515 516 517 518 519 520 521 522 523 524 525 526 527
-                    528 529 530 531 532 533 534 535 536 537 538 539 540 541
-                    542 543 544 545 546 547 548 549 550 551 552 553 554 555
-                    556 557 558 559 560 561 562 563 564 565 566 567 568 569
-                    570 571 572 573 574 575 576 577 578 579 580 581 582 583
-                    584 585 586 587 588 589 590 591 592 593 594 595 596 597
-                    598 599 600 601 602 603 604 605 606 607 608 609 610 611
-                    612 613 614 615 616 617 618 619 620 621 622 623 624 625
-                    626 627 628 629 630 631 632 633 634 635 636 637 638 639
-                    640 641 642 643 644 645 646 647 648 649 650 651 652 653
-                    654 655 656 657 658 659 660 661 662 663 664 665 666 667
-                    668 669 670 671 672 673 674 675 676 677 678 679 680 681
-                    682 683 684 685 686 687 688 689 690 691 692 693 694 695
-                    696 697 698 699 700 701 702 703 704 705 706 707 708 709
-                    710 711 712 713 714 715 716 717 718 719 720 721 722 723
-                    724 725 726 727 728 729 730 731 732 733 734 735 736 737
-                    738 739 740 741 742 743 744 745 746 747 748 749 750 751
-                    752 753 754 755 756 757 758 759 760 761 762 763 764 765
-                    766 767 768 769 770 771 772 773 774 775 776 777 778 779
-                    780 781 782 783 784 785 786 787 788 789 790 791 792 793
-                    794 795 796 797 798 799 800 801 802 803 804 805 806 807
-                    808 809 810 811 812 813 814 815 816 817 818 819 820 821
-                    822 823 824 825 826 827 828 829 830 831 832 833 834 835
-                    836 837 838 839 840 841 842 843 844 845 846 847 848 849
-                    850 851 852 853 854 855 856 857 858 859 860 861 862 863
-                    864 865 866 867 868 869 870 871 872 873 874 875 876 877
-                    878 879 880 881 882 883 884 885 886 887 888 889 890 891
-                    892 893 894 895 896 897 898 899 900 901 902 903 904 905
-                    906 907 908 909 910 911 912 913 914 915 916 917 918 919
-                    920 921 922 923 924 925 926 927 928 929 930 931 932 933
-                    934 935 936 937 938 939 940 941 942 943 944 945 946 947
-                    948 949 950 951 952 953 954 955 956 957 958 959 960 961
-                    962 963 964 965 966 967 968 969 970 971 972 973 974 975
-                    976 977 978 979 980 981 982 983 984 985 986 987 988 989
-                    990 991 992 993 994 995 996 997 998 999 1000 1001 1002)
+            (for i 3 1003
               (+ i 1))))))
-    )
-
-  (test
-    '(
-      "export circuit foo(): [] {"
-      "  for (const i of 3..1004) i + 1;"
-      "}"
-      )
-    (oops
-      message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 2 char 3" "difference ~s between end and start bounds is greater than the arbitrary compiler limit of ~s; use 'for ... in' syntax instead" (1001 1000)))
     )
 
   (test
@@ -8247,7 +8415,7 @@ groups than for single tests.
           ciphertexts
           (topaque "Uint8Array"))
         (constructor ([state (tfield)])
-          (block () (for i (tuple) (+ state 1))))
+          (block () (for i 3 3 (+ state 1))))
         (circuit #f #f foosbar () ()
              (ttuple)
           (block () (for i (tuple 3 2 1) (+ i 1))))
@@ -8812,7 +8980,7 @@ groups than for single tests.
           ciphertexts
           (topaque "Uint8Array"))
         (constructor ([state (tfield)])
-          (seq (for i (tuple) (seq (+ state 1) (tuple))) (tuple)))
+          (seq (for i 3 3 (seq (+ state 1) (tuple))) (tuple)))
         (circuit #f #f foosbar () ()
              (ttuple)
           (seq (for i (tuple 3 2 1) (seq (+ i 1) (tuple))) (tuple)))
@@ -9071,7 +9239,7 @@ groups than for single tests.
           ciphertexts
           (topaque "Uint8Array"))
         (constructor ([state (tfield)])
-          (seq (for i (tuple) (seq (+ state 1) (tuple))) (tuple)))
+          (seq (for i 3 3 (seq (+ state 1) (tuple))) (tuple)))
         (circuit #f #f foosbar () ()
              (ttuple)
           (seq (for i (tuple 3 2 1) (seq (+ i 1) (tuple))) (tuple)))
@@ -10099,7 +10267,7 @@ groups than for single tests.
         (circuit %S.0 ([%q.3 (tfield)]) (tfield) %q.3)
         (circuit %T.1 ([%q.4 (tfield)])
              (tfield)
-          (call (fref ((%S.2 %S.0))) %q.4))))
+          (call (fref ((%S.0 %S.2))) %q.4))))
   )
 
   (test
@@ -10286,16 +10454,16 @@ groups than for single tests.
           (call (fref ((%W.10))) (call (fref ((%S.14))) %q.23)))
         (circuit %foo1.0 ([%x.24 (tfield)])
              (tboolean)
-          (call (fref ((%T.18 %T.16))) %x.24))
+          (call (fref ((%T.16 %T.18))) %x.24))
         (circuit %foo2.1 ([%x.25 (tfield)])
              (tfield)
-          (call (fref ((%T.22 %T.20))) %x.25))
+          (call (fref ((%T.20 %T.22))) %x.25))
         (circuit %foo3.2 ([%x.26 (tboolean)])
              (tboolean)
-          (call (fref ((%T.18 %T.16))) %x.26))
+          (call (fref ((%T.16 %T.18))) %x.26))
         (circuit %foo4.3 ([%x.27 (tboolean)])
              (tfield)
-          (call (fref ((%T.22 %T.20))) %x.27))))
+          (call (fref ((%T.20 %T.22))) %x.27))))
     )
 
   (test
@@ -13491,6 +13659,208 @@ groups than for single tests.
        irritants: '("a.compact line 1 char 1" "parse error: found ~a looking for~?" ("\"oops\"" "~#[ nothing~; ~a~; ~a or ~a~:;~@{~#[~; or~] ~a~^,~}~]" ("a program element" "end of file"))))
      ))
   )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const NativePoint = nativePointX(x), CurvePoint = NativePointY(x);"
+      "  return constructNativePoint(CurvePoint, NativePoint);"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 37" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (CurvePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (nativePointX jubjubPointX))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 53" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePointY jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (constructNativePoint constructJubjubPoint)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const std$NativePoint = std$nativePointX(x), std$CurvePoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(std$CurvePoint, std$NativePoint);"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 41" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$CurvePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 27" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$nativePointX std$jubjubPointX))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 65" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePointY std$jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$constructNativePoint std$constructJubjubPoint)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const NativePoint = nativePointX(x), CurvePoint = NativePointY(x);"
+      "  const JubjubPoint = NativePoint;"
+      "  return constructNativePoint(CurvePoint, JubjubPoint);"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 37" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (CurvePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (nativePointX jubjubPointX))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 53" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePointY jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 5 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (constructNativePoint constructJubjubPoint)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const JubjubPoint = NativePointY(x);"
+      "  return constructNativePoint(JubjubPoint, ((x: NativePoint) => nativePointX(x))(x));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 37" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (CurvePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePointY jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (constructNativePoint constructJubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 49" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 65" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (nativePointX jubjubPointX)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(x: NativePoint): CurvePoint {"
+      "  const constructJubjubPoint = NativePointY(x);"
+      "  return constructNativePoint(constructJubjubPoint, ((x: NativePoint) => nativePointX(x))(x));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 37" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (CurvePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 32" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePointY jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (constructNativePoint constructJubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 58" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 74" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (nativePointX jubjubPointX)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const std$JubjubPoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(std$JubjubPoint, ((x: std$NativePoint) => std$nativePointX(x))(x));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 41" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$CurvePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 27" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePointY std$jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$constructNativePoint std$constructJubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 57" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 77" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$nativePointX std$jubjubPointX)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary prefix std$;"
+      "export circuit foo(x: std$NativePoint): std$CurvePoint {"
+      "  const JubjubPoint = std$NativePointY(x);"
+      "  return std$constructNativePoint(JubjubPoint, ((x: std$NativePoint) => std$nativePointX(x))(x));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 41" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$CurvePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 23" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePointY std$jubjubPointY))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 10" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$constructNativePoint std$constructJubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 53" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$NativePoint std$JubjubPoint))
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 73" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (std$nativePointX std$jubjubPointX)))
+    )
+
+  ; issue 116
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "circuit foo<T>(x: T): JubjubPoint {"
+      "  const a = jubjubPointX(x), b = jubjubPointY(x);"
+      "  return constructJubjubPoint(a, b);"
+      "}"
+      "circuit bar(x: JubjubPoint): JubjubPoint {"
+      "  return foo<NativePoint>(x);"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 7 char 14" "apparent use of an old standard-library / ledger operator name ~a:\n    the new name is ~a" (NativePoint JubjubPoint)))
+    )
+
+  (test
+    '(
+      "export circuit foo(): [] {"
+      "  for (const i of 4..3) i + 1;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 3" "end bound ~d is less than start bound ~s" (3 4)))
+    )
+
+  (test
+    `(
+      "export circuit foo(): [] {"
+      ,(format "  for (const i of 3..~d) i + 1;" (fx+ (max-bytes/vector-length) 4))
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 3" "the difference ~d between end and start bounds exceeds the maximum vector size ~d" (16777217 16777216)))
+    )
 )
 
 (run-tests infer-types
@@ -21073,7 +21443,6 @@ groups than for single tests.
       irritants: '("testfile.compact line 3 char 7" "cannot cast from type ~a to type ~a" ("[Boolean, Boolean, Boolean, Boolean]" "Bytes<4>")))
     )
 
-  ; tests for writing lang ref for patterns
   (test
     '(
       "circuit unroll<T>([a, [b, c], d]: [T, [T, T], T]) : [T, T, T, T] {"
@@ -22233,7 +22602,6 @@ groups than for single tests.
       )
     (succeeds))
 
-  ; tests for writing lang ref of return
   (test
     '(
       "export circuit foo(): [] {}"
@@ -23398,6 +23766,351 @@ groups than for single tests.
         (export-typedef SX (T) (tstruct SX (curidx (tunsigned 1))))
         (export-typedef SY (T)
           (tstruct SY (curidx (tunsigned 0))))))
+    )
+
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "export circuit fisk(msg: Opaque<'string'>): [] {"
+      "  hash = disclose(persistentHash<Opaque<'string'>>(msg));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentHash "Opaque<\"string\">")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "export circuit fisk(arr: Opaque<'Uint8Array'>): [] {"
+      "  hash = disclose(persistentHash<Opaque<'Uint8Array'>>(arr));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentHash "Opaque<\"Uint8Array\">")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "struct LabeledField {"
+      "  label: Opaque<'string'>;"
+      "  field: Field;"
+      "}"
+      "export circuit fisk(lf: LabeledField): [] {"
+      "  hash = disclose(persistentHash<LabeledField>(lf));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 8 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentHash "struct LabeledField<label: Opaque<\"string\">, field: Field>")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "export circuit fisk(msgs: Vector<10, Opaque<'string'>>): [] {"
+      "  hash = disclose(persistentHash<Vector<10, Opaque<'string'>>>(msgs));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentHash "Vector<10, Opaque<\"string\">>")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "new type Messages = Vector<10, Opaque<'string'>>;"
+      "export circuit fisk(msgs: Messages): [] {"
+      "  hash = disclose(persistentHash<Messages>(msgs));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 5 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentHash "Messages")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger hash: Bytes<32>;"
+      "export circuit fisk(msg: Opaque<'string'>): [] {"
+      "  hash = disclose(persistentCommit<Opaque<'string'>>(msg, hash));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 19" "~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (persistentCommit "Opaque<\"string\">")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger mt: MerkleTree<10, Opaque<'string'>>;"
+      "export circuit fisk(msg: Opaque<'string'>): [] {"
+      "  mt.insert(disclose(msg));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 5" "~a ~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (MerkleTree insert "Opaque<\"string\">")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger mt: MerkleTree<10, Opaque<'string'>>;"
+      "export circuit fisk(msg: Opaque<'string'>): [] {"
+      "  mt.insertIndex(disclose(msg), 21);"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 5" "~a ~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (MerkleTree insertIndex "Opaque<\"string\">")))
+    )
+    (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger mt: HistoricMerkleTree<10, Opaque<'string'>>;"
+      "export circuit fisk(msg: Opaque<'string'>): [] {"
+      "  mt.insert(disclose(msg));"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 4 char 5" "~a ~a cannot be applied to a first argument containing opaque JavaScript values, received ~a" (HistoricMerkleTree insert "Opaque<\"string\">")))
+    )
+
+  (test
+    '(
+      "export circuit foo(): [] {"
+      "  for (const i of 3..7) i + 1;"
+      "}"
+      )
+    (returns
+      (program
+        (circuit %foo.0 ()
+             (ttuple)
+          (seq
+            (fold
+              (circuit ([%t.1 (ttuple)] [%i.2 (tunsigned 6)])
+                   (ttuple)
+                (seq
+                  (seq
+                    (+ 3
+                       (safe-cast (tunsigned 7) (tunsigned 6) %i.2)
+                       (safe-cast (tunsigned 7) (tunsigned 1) 1))
+                    (tuple))
+                  %t.1))
+              (tuple)
+              (tuple 3 4 5 6))
+            (tuple)))))
+    )
+
+  (test
+    '(
+      "export circuit foo(): [] {"
+      "  for (const i of 3..1003) i + 1;"
+      "}"
+      )
+    (returns
+      (program
+        (circuit %foo.0 ()
+             (ttuple)
+          (seq
+            (fold
+              (circuit ([%t.1 (ttuple)] [%i.2 (tunsigned 1002)])
+                   (ttuple)
+                (seq
+                  (seq
+                    (+ 10
+                       (safe-cast (tunsigned 1003) (tunsigned 1002) %i.2)
+                       (safe-cast (tunsigned 1003) (tunsigned 1) 1))
+                    (tuple))
+                  %t.1))
+              (tuple)
+              (tuple 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22
+               23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42
+               43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62
+               63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82
+               83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101
+               102 103 104 105 106 107 108 109 110 111 112 113 114 115 116
+               117 118 119 120 121 122 123 124 125 126 127 128 129 130 131
+               132 133 134 135 136 137 138 139 140 141 142 143 144 145 146
+               147 148 149 150 151 152 153 154 155 156 157 158 159 160 161
+               162 163 164 165 166 167 168 169 170 171 172 173 174 175 176
+               177 178 179 180 181 182 183 184 185 186 187 188 189 190 191
+               192 193 194 195 196 197 198 199 200 201 202 203 204 205 206
+               207 208 209 210 211 212 213 214 215 216 217 218 219 220 221
+               222 223 224 225 226 227 228 229 230 231 232 233 234 235 236
+               237 238 239 240 241 242 243 244 245 246 247 248 249 250 251
+               252 253 254 255 256 257 258 259 260 261 262 263 264 265 266
+               267 268 269 270 271 272 273 274 275 276 277 278 279 280 281
+               282 283 284 285 286 287 288 289 290 291 292 293 294 295 296
+               297 298 299 300 301 302 303 304 305 306 307 308 309 310 311
+               312 313 314 315 316 317 318 319 320 321 322 323 324 325 326
+               327 328 329 330 331 332 333 334 335 336 337 338 339 340 341
+               342 343 344 345 346 347 348 349 350 351 352 353 354 355 356
+               357 358 359 360 361 362 363 364 365 366 367 368 369 370 371
+               372 373 374 375 376 377 378 379 380 381 382 383 384 385 386
+               387 388 389 390 391 392 393 394 395 396 397 398 399 400 401
+               402 403 404 405 406 407 408 409 410 411 412 413 414 415 416
+               417 418 419 420 421 422 423 424 425 426 427 428 429 430 431
+               432 433 434 435 436 437 438 439 440 441 442 443 444 445 446
+               447 448 449 450 451 452 453 454 455 456 457 458 459 460 461
+               462 463 464 465 466 467 468 469 470 471 472 473 474 475 476
+               477 478 479 480 481 482 483 484 485 486 487 488 489 490 491
+               492 493 494 495 496 497 498 499 500 501 502 503 504 505 506
+               507 508 509 510 511 512 513 514 515 516 517 518 519 520 521
+               522 523 524 525 526 527 528 529 530 531 532 533 534 535 536
+               537 538 539 540 541 542 543 544 545 546 547 548 549 550 551
+               552 553 554 555 556 557 558 559 560 561 562 563 564 565 566
+               567 568 569 570 571 572 573 574 575 576 577 578 579 580 581
+               582 583 584 585 586 587 588 589 590 591 592 593 594 595 596
+               597 598 599 600 601 602 603 604 605 606 607 608 609 610 611
+               612 613 614 615 616 617 618 619 620 621 622 623 624 625 626
+               627 628 629 630 631 632 633 634 635 636 637 638 639 640 641
+               642 643 644 645 646 647 648 649 650 651 652 653 654 655 656
+               657 658 659 660 661 662 663 664 665 666 667 668 669 670 671
+               672 673 674 675 676 677 678 679 680 681 682 683 684 685 686
+               687 688 689 690 691 692 693 694 695 696 697 698 699 700 701
+               702 703 704 705 706 707 708 709 710 711 712 713 714 715 716
+               717 718 719 720 721 722 723 724 725 726 727 728 729 730 731
+               732 733 734 735 736 737 738 739 740 741 742 743 744 745 746
+               747 748 749 750 751 752 753 754 755 756 757 758 759 760 761
+               762 763 764 765 766 767 768 769 770 771 772 773 774 775 776
+               777 778 779 780 781 782 783 784 785 786 787 788 789 790 791
+               792 793 794 795 796 797 798 799 800 801 802 803 804 805 806
+               807 808 809 810 811 812 813 814 815 816 817 818 819 820 821
+               822 823 824 825 826 827 828 829 830 831 832 833 834 835 836
+               837 838 839 840 841 842 843 844 845 846 847 848 849 850 851
+               852 853 854 855 856 857 858 859 860 861 862 863 864 865 866
+               867 868 869 870 871 872 873 874 875 876 877 878 879 880 881
+               882 883 884 885 886 887 888 889 890 891 892 893 894 895 896
+               897 898 899 900 901 902 903 904 905 906 907 908 909 910 911
+               912 913 914 915 916 917 918 919 920 921 922 923 924 925 926
+               927 928 929 930 931 932 933 934 935 936 937 938 939 940 941
+               942 943 944 945 946 947 948 949 950 951 952 953 954 955 956
+               957 958 959 960 961 962 963 964 965 966 967 968 969 970 971
+               972 973 974 975 976 977 978 979 980 981 982 983 984 985 986
+               987 988 989 990 991 992 993 994 995 996 997 998 999 1000
+               1001 1002))
+            (tuple)))))
+    )
+
+  (test
+    `(
+      "export circuit foo(): [] {"
+      ,(format "  for (const i of ~d..~d) i + 1;"
+         (- (max-unsigned) 10)
+         (max-unsigned))
+      "}"
+      )
+    (returns
+      (program
+        (circuit %foo.0 ()
+             (ttuple)
+          (seq
+            (fold
+              (circuit ([%t.1 (ttuple)]
+                        [%i.2 (tunsigned
+                                452312848583266388373324160190187140051835877600158453279131187530910662654)])
+                   (ttuple)
+                (seq
+                  (seq
+                    (+ 248
+                       (safe-cast (tunsigned
+                                    452312848583266388373324160190187140051835877600158453279131187530910662655)
+                                  (tunsigned
+                                    452312848583266388373324160190187140051835877600158453279131187530910662654)
+                         %i.2)
+                       (safe-cast (tunsigned
+                                    452312848583266388373324160190187140051835877600158453279131187530910662655)
+                                  (tunsigned 1)
+                         1))
+                    (tuple))
+                  %t.1))
+              (tuple)
+              (tuple
+                452312848583266388373324160190187140051835877600158453279131187530910662645
+                452312848583266388373324160190187140051835877600158453279131187530910662646
+                452312848583266388373324160190187140051835877600158453279131187530910662647
+                452312848583266388373324160190187140051835877600158453279131187530910662648
+                452312848583266388373324160190187140051835877600158453279131187530910662649
+                452312848583266388373324160190187140051835877600158453279131187530910662650
+                452312848583266388373324160190187140051835877600158453279131187530910662651
+                452312848583266388373324160190187140051835877600158453279131187530910662652
+                452312848583266388373324160190187140051835877600158453279131187530910662653
+                452312848583266388373324160190187140051835877600158453279131187530910662654))
+            (tuple)))))
+    )
+
+  (test
+    `(
+      "export circuit foo(): [] {"
+      ,(format "  for (const i of ~d..~d) i + 1;"
+         (- (max-unsigned) 5)
+         (+ (max-unsigned) 5))
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 3" "end bound ~d is greater than the maximum unsigned integer ~d" (452312848583266388373324160190187140051835877600158453279131187530910662660 452312848583266388373324160190187140051835877600158453279131187530910662655)))
+    )
+
+  (test
+    `(
+      "export circuit foo(): [] {"
+      "  for (const i of 3..7) {"
+      "    if (i == 4) 0; else true;"
+      "  }"
+      "}"
+      )
+    (returns
+      (program
+        (circuit %foo.0 ()
+             (ttuple)
+          (seq
+            (fold
+              (circuit ([%t.1 (ttuple)] [%i.2 (tunsigned 6)])
+                   (ttuple)
+                (seq
+                  (seq
+                    (if (== %i.2 (safe-cast (tunsigned 6) (tunsigned 4) 4))
+                        0
+                        #t)
+                    (tuple))
+                  %t.1))
+              (tuple)
+              (tuple 3 4 5 6))
+            (tuple)))))
+    )
+
+  (test
+    `(
+      "export circuit foo(v: Vector<4, Field>): [] {"
+      "  for (const i of v) {"
+      "    if (i == 4) 0; else true;"
+      "  }"
+      "}"
+      )
+    (returns
+      (program
+        (circuit %foo.0 ([%v.1 (tvector 4 (tfield))])
+             (ttuple)
+          (seq
+            (fold
+              (circuit ([%t.3 (ttuple)] [%i.2 (tfield)])
+                   (ttuple)
+                (seq
+                  (seq
+                    (if (== %i.2 (safe-cast (tfield) (tunsigned 4) 4)) 0 #t)
+                    (tuple))
+                  %t.3))
+              (tuple)
+              %v.1)
+            (tuple)))))
     )
 )
 
@@ -24746,7 +25459,7 @@ groups than for single tests.
       )
     (oops
       message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 4 char 37" "~s ~s requires ~s argument~:*~p but received ~s" (__compact_Cell write 1 0)))
+      irritants: '("testfile.compact line 4 char 37" "~a ~a requires ~a argument~:*~p but received ~a" (__compact_Cell write 1 0)))
     )
 
   (test
@@ -24758,7 +25471,7 @@ groups than for single tests.
       )
     (oops
       message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 4 char 44" "~s ~s requires ~s argument~:*~p but received ~s" (__compact_Cell read 0 1)))
+      irritants: '("testfile.compact line 4 char 44" "~a ~a requires ~a argument~:*~p but received ~a" (__compact_Cell read 0 1)))
     )
 
   (test
@@ -24782,7 +25495,7 @@ groups than for single tests.
       )
     (oops
       message: "~a:\n  ~?"
-      irritants: '("testfile.compact line 4 char 37" "~s ~s requires ~s argument~:*~p but received ~s" (__compact_Cell write 1 2)))
+      irritants: '("testfile.compact line 4 char 37" "~a ~a requires ~a argument~:*~p but received ~a" (__compact_Cell write 1 2)))
     )
 
   (test
@@ -38102,57 +38815,65 @@ groups than for single tests.
           (= %t.76 (public-ledger #t %field5.6 (5) resetToDefault))
           (= %t.77 (public-ledger #t %field6.7 (6) resetToDefault))
           (= %value.78 (public-ledger #t %kernel.0 () self))
-          (= %tmp.79
+          (= %t.79
+             (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32)))))
+          (= %tmp.80
              (new (tstruct Either
                     (is_left (tboolean))
                     (left (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
                     (right (tstruct ContractAddress (bytes (tbytes 32)))))
                #f
-               (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
+               %t.79
                %value.78))
-          (= %t.80
-             (public-ledger #t %field7.8 (7) writeCoin %ci.14 %tmp.79))
-          (= %t.81 (public-ledger #t %field8.9 (8) resetToDefault))
-          (= %value.82 (public-ledger #t %kernel.0 () self))
-          (= %tmp.83
-             (new (tstruct Either
-                    (is_left (tboolean))
-                    (left (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
-                    (right (tstruct ContractAddress (bytes (tbytes 32)))))
-               #f
-               (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
-               %value.82))
+          (= %t.81
+             (public-ledger #t %field7.8 (7) writeCoin %ci.14 %tmp.80))
+          (= %t.82 (public-ledger #t %field8.9 (8) resetToDefault))
+          (= %value.83 (public-ledger #t %kernel.0 () self))
           (= %t.84
-             (public-ledger #t %field8.9 (8) insertCoin %ci.14 %tmp.83))
-          (= %t.85 (public-ledger #t %field9.10 (9) resetToDefault))
-          (= %value.86 (public-ledger #t %kernel.0 () self))
-          (= %tmp.87
+             (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32)))))
+          (= %tmp.85
              (new (tstruct Either
                     (is_left (tboolean))
                     (left (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
                     (right (tstruct ContractAddress (bytes (tbytes 32)))))
                #f
-               (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
-               %value.86))
-          (= %t.88
+               %t.84
+               %value.83))
+          (= %t.86
+             (public-ledger #t %field8.9 (8) insertCoin %ci.14 %tmp.85))
+          (= %t.87 (public-ledger #t %field9.10 (9) resetToDefault))
+          (= %value.88 (public-ledger #t %kernel.0 () self))
+          (= %t.89
+             (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32)))))
+          (= %tmp.90
+             (new (tstruct Either
+                    (is_left (tboolean))
+                    (left (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
+                    (right (tstruct ContractAddress (bytes (tbytes 32)))))
+               #f
+               %t.89
+               %value.88))
+          (= %t.91
              (public-ledger #t %field9.10 (9) insertCoin
                %x.13
                %ci.14
-               %tmp.87))
-          (= %t.89 (public-ledger #t %field10.11 (10) resetToDefault))
-          (= %value.90 (public-ledger #t %kernel.0 () self))
-          (= %tmp.91
+               %tmp.90))
+          (= %t.92 (public-ledger #t %field10.11 (10) resetToDefault))
+          (= %value.93 (public-ledger #t %kernel.0 () self))
+          (= %t.94
+             (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32)))))
+          (= %tmp.95
              (new (tstruct Either
                     (is_left (tboolean))
                     (left (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
                     (right (tstruct ContractAddress (bytes (tbytes 32)))))
                #f
-               (default (tstruct ZswapCoinPublicKey (bytes (tbytes 32))))
-               %value.90))
-          (= %t.92
+               %t.94
+               %value.93))
+          (= %t.96
              (public-ledger #t %field10.11 (10) pushFrontCoin
                %ci.14
-               %tmp.91))
+               %tmp.95))
           %q.22)))
     )
 
@@ -46081,6 +46802,40 @@ groups than for single tests.
           (= %t.1 (== %ix.0 0))
           (%t.1))))
     )
+  ;; Unused `default`.
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger impure: Boolean;"
+      "export circuit fisk(pt: JubjubPoint): JubjubPoint {"
+      "  impure = true;"
+      "  const pt0 = default<JubjubPoint>;"
+      "  const pt1 = ecAdd(pt, pt);"
+      "  return pt1;"
+      "}"
+      )
+    (returns
+      (program
+        (kernel-declaration (%kernel.0 () (Kernel)))
+        (public-ledger-declaration
+          ((%impure.1
+             (0)
+             (__compact_Cell (ty ((abytes 1)) ((tfield 1)))))))
+        (native %ecAdd.2 ((argument
+                            (%a.3 %a.4)
+                            (ty ((afield) (afield)) ((tfield) (tfield))))
+                          (argument
+                            (%b.5 %b.6)
+                            (ty ((afield) (afield)) ((tfield) (tfield)))))
+             (ty ((afield) (afield)) ((tfield) (tfield))))
+        (circuit %fisk.7 ((argument
+                            (%pt.8 %pt.9)
+                            (ty ((afield) (afield)) ((tfield) (tfield)))))
+             (ty ((afield) (afield)) ((tfield) (tfield)))
+          (= () (public-ledger 1 %impure.1 (0) write 1))
+          (= (%pt1.10 %pt1.11)
+             (call 1 %ecAdd.2 %pt.8 %pt.9 %pt.8 %pt.9))
+          (%pt1.10 %pt1.11)))))
 )
 
 (run-tests print-zkir
@@ -55127,7 +55882,7 @@ groups than for single tests.
       "}"
       ""
       "export circuit three(): [S, Bytes<32>] {"
-      "  return [field0, persistentHash<Opaque<'string'>>(field1)];"
+      "  return [field0, persistentHash<S>(field0)];"
       "}"
      )
     (succeeds)
@@ -57286,7 +58041,50 @@ groups than for single tests.
         "  ]"
         "}"))
     )
-)
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger impure: Boolean;"
+      "export circuit fisk(): JubjubPoint {"
+      "  impure = true;"
+      "  const pt = default<JubjubPoint>;"
+      "  return ecAdd(pt, pt);"
+      "}"
+      )
+    (output-file "compiler/testdir/zkir/fisk.zkir"
+      '(
+        "{"
+        "  \"version\": { \"major\": 2, \"minor\": 0 },"
+        "  \"do_communications_commitment\": true,"
+        "  \"num_inputs\": 0,"
+        "  \"instructions\": ["
+        "    { \"op\": \"load_imm\", \"imm\": \"01\" },"
+        "    { \"op\": \"load_imm\", \"imm\": \"10\" },"
+        "    { \"op\": \"load_imm\", \"imm\": \"00\" },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 1 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 2 },"
+        "    { \"op\": \"pi_skip\", \"guard\": 0, \"count\": 5 },"
+        "    { \"op\": \"load_imm\", \"imm\": \"11\" },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 3 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 0 },"
+        "    { \"op\": \"pi_skip\", \"guard\": 0, \"count\": 5 },"
+        "    { \"op\": \"load_imm\", \"imm\": \"91\" },"
+        "    { \"op\": \"declare_pub_input\", \"var\": 4 },"
+        "    { \"op\": \"pi_skip\", \"guard\": 0, \"count\": 1 },"
+        "    { \"op\": \"ec_add\", \"a_x\": 2, \"a_y\": 0, \"b_x\": 2, \"b_y\": 0 },"
+        "    { \"op\": \"output\", \"var\": 5 },"
+        "    { \"op\": \"output\", \"var\": 6 }"
+        "  ]"
+        "}"))
+    )
+  )
 
 (parameterize ([feature-zkir-v3 #t])
 (run-tests print-zkir-v3
@@ -57734,7 +58532,7 @@ groups than for single tests.
         "    { \"op\": \"encode\", \"outputs\": [\"%t.4\", \"%ingore.5\"], \"input\": \"%p2.1\" },"
         "    { \"op\": \"transient_hash\", \"output\": \"%t.6\", \"inputs\": [\"%t.2\", \"%t.4\"] },"
         "    { \"op\": \"ec_mul\", \"output\": \"%t.7\", \"a\": \"%p1.0\", \"scalar\": \"%t.6\" },"
-        "    { \"op\": \"ec_mul_generator\", \"outputs\": \"%t.8\", \"scalar\": \"0x11\" },"
+        "    { \"op\": \"ec_mul_generator\", \"output\": \"%t.8\", \"scalar\": \"0x11\" },"
         "    { \"op\": \"add\", \"output\": \"%t.9\", \"a\": \"%t.7\", \"b\": \"%t.8\" },"
         "    { \"op\": \"public_input\", \"type\": \"Scalar<BLS12-381>\", \"output\": \"%t.10\", \"guard\": null },"
         "    { \"op\": \"public_input\", \"type\": \"Scalar<BLS12-381>\", \"output\": \"%t.11\", \"guard\": null },"
@@ -62184,7 +62982,7 @@ groups than for single tests.
       "}"
       ""
       "export circuit three(): [S, Bytes<32>] {"
-      "  return [field0, persistentHash<Opaque<'string'>>(field1)];"
+      "  return [field0, persistentHash<S>(field0)];"
       "}"
      )
     (succeeds)
@@ -63630,8 +64428,753 @@ groups than for single tests.
         "  ]"
         "}"))
     )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger impure: Boolean;"
+      "export circuit fisk(): JubjubPoint {"
+      "  impure = true;"
+      "  const pt = default<JubjubPoint>;"
+      "  return ecAdd(pt, pt);"
+      "}"
+      )
+    (output-file "compiler/testdir/zkir/fisk.zkir"
+      '(
+        "{"
+        "  \"version\": { \"major\": 3, \"minor\": 0 },"
+        "  \"do_communications_commitment\": false,"
+        "  \"inputs\": ["
+        "  ],"
+        "  \"instructions\": ["
+        "    { \"op\": \"impact\", \"guard\": \"0x01\", \"inputs\": [\"0x10\", \"0x01\", \"0x01\", \"0x01\", \"0x00\", \"0x11\", \"0x01\", \"0x01\", \"0x01\", \"0x01\", \"0x91\"] },"
+        "    { \"op\": \"decode\", \"type\": \"Point<Jubjub>\", \"output\": \"%pt.0\", \"inputs\": [\"0x00\", \"0x01\"] },"
+        "    { \"op\": \"add\", \"output\": \"%t.1\", \"a\": \"%pt.0\", \"b\": \"%pt.0\" },"
+        "    { \"op\": \"output\", \"val\": \"%t.1\" }"
+        "  ]"
+        "}"))
+    )
 )
 )
+
+; tests of code snippets in lang-ref
+(run-tests print-typescript
+  ; change: " --> ' for message of assert
+  (test
+    '(
+      "circuit c(): Field {"
+      "  const answer = 42;"
+      "  {"
+      "    const answer = 12;"
+      "    assert(answer != 42, 'shadowing did not work!');"
+      "  }"
+      "  return answer; // returns 42 (the outer 'answer')"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module M<T, #N> {"
+      "  export circuit foo<A>(x: T, v: Vector<N, A>): Vector<N, [A, T]> {"
+      "    return map((y) => [y, x], v);"
+      "  }"
+      "}"
+      "import M<Boolean, 3>;"
+      "export circuit bar1(): Vector<3, [Uint<8>, Boolean]> {"
+      "  return foo<Uint<8>>(true, [101, 103, 107]);"
+      "}"
+      "export circuit bar2(): Vector<3, [Boolean, Boolean]> {"
+      "  return foo<Boolean>(false, [true, false, true]);"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.bar1(Ctxt).result).toEqual([[101n, true], [103n, true], [107n, true]]);"
+        "  expect(C.circuits.bar2(Ctxt).result).toEqual([[true, false], [false, false], [true, false]]);"
+        "});"
+        ))
+    )
+
+  (test
+    '(
+      "struct Thing {"
+      "  triple: Vector<3, Field>,"
+      "  flag: Boolean,"
+      "}"
+      ""
+      "struct NumberAnd<T> {"
+      "  num: Uint<32>;"
+      "  item: T"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct NumberAnd {"
+      "  num: Uint<32>;"
+      "  item: Uint<8>"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module M {"
+      "  struct NumberAnd {"
+      "    num: Uint<32>;"
+      "    item: Uint<8>"
+      "  }"
+      "  export circuit bar(x: NumberAnd): NumberAnd {"
+      "    return x;"
+      "  }"
+      "}"
+      "import M;"
+      "struct NumberAnd<T> {"
+      "  num: Uint<32>;"
+      "  item: T"
+      "}"
+      "export circuit foo(x: NumberAnd<Uint<8>>): NumberAnd<Uint<8>> {"
+      "  return bar(x);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct Even {"
+      "  predecessor: Odd"
+      "}"
+      ""
+      "struct Odd {"
+      "  predecessor: Even"
+      "}"
+      ""
+      "export circuit doesntWork(s: Even): Odd {"
+      "  return s.predecessor;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 6 char 16" "cycle involving ~a~?" ("type" "~#[~; ~a~;s ~a and ~a~:;s~@{~#[~; and~] ~a~^,~}~]" (Odd Even))))
+    )
+
+  (test
+    '(
+      "enum Arrow { up, down, left, right };"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "type V3<T> = Vector<3, T>;"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "new type VField<#N> = Vector<N, Field>;"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "circuit sumTuple(x: [Field, Field]): Field {"
+      "  const a = x[0], b = x[1];"
+      "  return a + b;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "circuit sumTuple(x: [Field, Field]): Field {"
+      "  const [a, b] = x;"
+      "  return a + b;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "circuit sumTuple([a, b]: [Field, Field]): Field {"
+      "  return a + b;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumStruct({x, y}: S): Field {"
+      "  return x + y;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumStruct({y, x}: S): Field {"
+      "  return x + y;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumStruct({x: a, y}: S): Field {"
+      "  return a + y;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumTupleStruct([{x: a1, y: b1}, {x: a2, y: b2}]: [S, S]): Field {"
+      "  return a1 + b1 + a2 + b2;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumSomeYs([{y: b1}, , {y: b3}]: [S, S, S]): Field {"
+      "  return b1 + b3;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumStruct({x, y}: [Field, Field]): Field {"
+      "  return x + y;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 19" "expected structure type, received ~a" ("[Field, Field]")))
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumSomeYs([{y: b1}, , , {y: b3}]: [S, S, S]): Field {"
+      "  return b1 + b3;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 19" "index ~d is out-of-bounds for a ~a of length ~d" (3 "tuple" 3)))
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumSomeYs([{y: b1}, , {z: b3}]: [S, S, S]): Field {"
+      "  return b1 + b3;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 31" "structure ~s has no field named ~s" (S z)))
+    )
+
+  (test
+    '(
+      "struct S { x: Uint<16>, y: Uint<32> }"
+      "circuit sumSomeYs([{y: b1,}, , {y: b3,},]: [S, S, S]): Field {"
+      "  return b1 + b3;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test-group
+    ((create-file "M.compact"
+       '(
+         "module M {"
+         "  export { G };"
+         "  export struct S { x: Uint<16>, y: Boolean }"
+         "  circuit G(x: S): Boolean {"
+         "    return x.y;"
+         "  }"
+         "}"
+         ))
+      (succeeds))
+    ((create-file "test1.compact"
+       '(
+         "import M;"
+         "export { G };"
+         ))
+     (succeeds))
+    )
+
+  (test
+    '(
+      "module Runner {"
+      "  export circuit start(): [] {}"
+      "  export circuit stop(): [] {}"
+      "}"
+      "module UseRunner1 {"
+      "  import Runner;"
+      "  // start and stop are now in scope"
+      "}"
+      "module UseRunner2 {"
+      "  import { start } from Runner;"
+      "  // start is now in scope, but not stop"
+      "}"
+      "module UseRunner3 {"
+      "  import Runner prefix Runner$;"
+      "  // Runner$start and Runner$stop are now in scope, but not stop or run"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module Identity<T> {"
+      "  export { id }"
+      "  circuit id(x: T): T {"
+      "    return x;"
+      "  }"
+      "}"
+      "import Identity<Field>;"
+      "// id is now in scope, specialized to type Field"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module M {"
+      "  export { F };"
+      "  export struct S { x: Uint<16>, y: Boolean }"
+      "  circuit F(x: S): Boolean {"
+      "    return x.y;"
+      "  }"
+      "}"
+      "import M;"
+      "export { F };"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module M {"
+      "  export { G };"
+      "  export struct S { x: Uint<16>, y: Boolean }"
+      "  circuit G(x: S): Boolean {"
+      "    return x.y;"
+      "  }"
+      "}"
+      "import M;"
+      "export { G };"
+      )
+    (succeeds)
+    )
+
+  (test-group
+    ((create-file "M.compact"
+       '(
+         "module M {"
+         "  export { F };"
+         "  export struct S { x: Uint<16>, y: Boolean }"
+         "  circuit F(x: S): Boolean {"
+         "    return x.y;"
+         "  }"
+         "}"
+         ))
+      (succeeds))
+    ((create-file "A/M.compact"
+       '(
+         "module M {"
+         "  export { F };"
+         "  export struct S { x: Uint<16>, y: Boolean }"
+         "  circuit F(x: S): Boolean {"
+         "    return x.y;"
+         "  }"
+         "}"
+         ))
+      (succeeds))
+    ((create-file "test.compact"
+       '(
+         "module M {"
+         "  export { F };"
+         "  export struct S { x: Uint<16>, y: Boolean }"
+         "  circuit F(x: S): Boolean {"
+         "    return x.y;"
+         "  }"
+         "}"
+         "import M prefix M1$;"
+         "import 'M' prefix M2$;"
+         "import 'A/M' prefix M3$;"
+         ""
+         "export { M1$F, M2$F, M3$F };"
+         ))
+     (succeeds))
+    )
+
+  (test
+    '(
+      "export struct S<#n, T> { v: Vector<n, T>; curidx: Uint<0..n> }"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "witness W(x: Uint<16>): Bytes<32>;"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger val: Field;"
+      "export ledger cnt: Counter;"
+      "sealed ledger u8list: List<Uint<8>>;"
+      "export sealed ledger mapping: Map<Boolean, Field>;"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "ledger F: Uint<16>;"
+      "export circuit putF(x: Uint<16>): [] {"
+      "  F.write(disclose(x));"
+      "}"
+      "export circuit getF(): Uint<16> {"
+      "  return F.read();"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "ledger F: Uint<16>;"
+      "export circuit putF(x: Uint<16>): [] {"
+      "  F = disclose(x);"
+      "}"
+      "export circuit getF(): Uint<16> {"
+      "  return F;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger F: Counter;"
+      "export circuit incrF(): [] {"
+      "  F += 1;"
+      "}"
+      "export circuit decrF(): [] {"
+      "  F -= 1;"
+      "}"
+      "export circuit getF(): Uint<64> {"
+      "  return F;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "ledger F: Uint<64>;"
+      "export circuit incrF(): [] {"
+      "  F = F + 1 as Uint<64>;"
+      "}"
+      "export circuit decrF(): [] {"
+      "  F = F - 1;"
+      "}"
+      "export circuit getF(): Uint<64> {"
+      "  return F;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "ledger fld: Map<Boolean, Map<Field, Counter>>;"
+      ""
+      "export circuit initNestedMap(b: Boolean): [] {"
+      "  fld.insert(disclose(b), default<Map<Field, Counter>>);"
+      "}"
+      ""
+      "export circuit initNestedCounter(b: Boolean, n: Field): [] {"
+      "  fld.lookup(b).insert(disclose(n), default<Counter>);"
+      "}"
+      ""
+      "export circuit incrementNestedCounter(b: Boolean, n: Field, k: Uint<16>): [] {"
+      "  fld.lookup(b).lookup(n).increment(disclose(k));"
+      "}"
+      ""
+      "export circuit readNestedCounter1(b: Boolean, n: Field): Uint<64> {"
+      "  return fld.lookup(b).lookup(n).read();"
+      "}"
+      ""
+      "export circuit readNestedCounter2(b: Boolean, n: Field): Uint<64> {"
+      "  return fld.lookup(b).lookup(n);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "ledger fld: Map<Boolean, Map<Field, Counter>>;"
+      ""
+      "export circuit incrementNestedCounter(b: Boolean, n: Field, k: Uint<16>): [] {"
+      "  fld.lookup(b); // ERROR: incomplete chain of indirects"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 6 char 6" "incomplete chain of ledger indirects: final result must be a regular type, but received ADT type ~a" ("Map<Field, Counter>")))
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "ledger fld: Map<Boolean, Map<Field, Counter>>;"
+      ""
+      "export circuit initNestedMap(b: Boolean): [] {"
+      "  const t = default<Map<Field, Counter>>;"
+      "  fld.insert(disclose(b), t);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "sealed ledger field1: Uint<32>;"
+      "export sealed ledger field2: Uint<32>;"
+      ""
+      "circuit init(x: Uint<32>): [] {"
+      "  field2 = disclose(x);"
+      "}"
+      ""
+      "constructor(x: Uint<16>) {"
+      "  field1 = 2 * disclose(x);"
+      "  init(x);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "module PublicState {"
+      "  enum STATE { unset, set }"
+      "  ledger state: STATE;"
+      "  ledger value: Field;"
+      "  export circuit init(v: Field): [] {"
+      "    value = disclose(v);"
+      "    state = STATE.set;"
+      "  }"
+      "}"
+      ""
+      "import PublicState;"
+      ""
+      "constructor(v: Field) {"
+      "  init(v);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "pure circuit c(a: Field): Field {"
+      "  return a;"
+      "}"
+      ""
+      "export pure circuit c(a: Field): Field {"
+      "  return a;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "circuit f(): ContractAddress {"
+      "  return kernel.self();"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "struct S { a: Uint<32>, b: Boolean, c: Bytes<8> }"
+      "circuit f(x: Uint<32>, y: Boolean, z: Bytes<8>): S {"
+      "  const s1 = S { c: z, a: x, b: y };"
+      "  // Alternatively, s1 can be created with the positional syntax S { x, y, z }"
+      "  // or a mix of positional and named field values S { x, c: z, b: y }."
+      ""
+      "  const s2 = S { ...s1, b: true };"
+      "  // s2 is created using the spread syntax.  So, s2 has the same field values"
+      "  // as s1 except that b is true."
+      ""
+      "  const s3 = S { ...s2, c: 'abcdefgh' };"
+      "  // s3 is also created using the spread syntax.  s3 has the same field values"
+      "  // as s2 except that c is 'abcdefgh'."
+      ""
+      "  return s3;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "ledger F: Uint<16>;"
+      "export circuit setf(x: Uint<16>): [] {"
+      "  F = x;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 3 char 5" "potential witness-value disclosure must be declared but is not:\n    witness value potentially disclosed:\n      ~a~{~a~}" ("the value of parameter x of exported circuit setf at line 2 char 21" ("\n    nature of the disclosure:\n      ledger operation might disclose the witness value\n    via this path through the program:\n      the right-hand side of = at line 3 char 5"))))
+    )
+
+  (test
+    '(
+      "ledger F: Uint<16>;"
+      "export circuit setf(x: Uint<16>): [] {"
+      "  F = disclose(x);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "witness w(): [Boolean, [Uint<16>, Uint<32>]];"
+      "circuit foo(): [Uint<64>, Uint<64>] {"
+      "  const [x, y]: [Boolean, [Uint<64>, Uint<64>]] = w();"
+      "  return x ? y : [0, 0];"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "witness w(): [Boolean, [Uint<16>, Uint<32>]];"
+      "circuit foo(): [Uint<64>, Uint<64>] {"
+      "  const [x, y] = w();"
+      "  return x ? y : [0, 0];"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "witness w(): [Boolean, [Uint<16>, Uint<32>]];"
+      "circuit foo(): [Uint<64>, Uint<64>] {"
+      "  const [x, y] = w();"
+      "  return x ? y : [0, 0];"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "circuit foo(a: Uint<16>): Field {"
+      "  const y = x + a;"
+      "  const x = 7;"
+      "  return y;"
+      "}"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 13" "identifier ~s might be referenced before it is assigned" (x)))
+    )
+
+  (test
+    '(
+      "circuit foo<#N>(): Uint<16> {"
+      "  return N;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "circuit foo(): Uint<16> {"
+      "  return 17;"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "new type Feet = Uint<32>;"
+      "circuit foo(x: Feet, y: Feet, scale: Uint<32>): Feet {"
+      "  return (x + y) * (scale as Feet);"
+      "}"
+      )
+    (succeeds)
+    )
+
+  (test
+    '(
+      "export circuit getMiddle(x: Bytes<5>): Bytes<3> {"
+      "  return slice<3>(x, 1);"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.getMiddle(Ctxt, new Uint8Array([17, 18, 19, 20, 21])).result).toEqual(new Uint8Array([18, 19, 20]));"
+        "});"
+        ))
+    )
+  )
 
 (with-parameter-values ([feature-zkir-v3 #f #t])
 (run-tests print-typescript
@@ -65484,7 +67027,7 @@ groups than for single tests.
         "});"
         "test('check 2b', () => {"
         "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
-        "  expect(() => C.circuits.baz(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 1 char 53: the integer value of 9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4 is greater than the maximum value of a Field');"
+        "  expect(() => C.circuits.baz(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 1 char 53: byte vector [9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4] exceeds maximum value 52435875175126190479447740508185965837690552500527637822603658699938581184512 of Field type');"
         "});"
         ))
     )
@@ -65971,6 +67514,185 @@ groups than for single tests.
         "  expect(C.circuits.foo(Ctxt).result).toEqual({a: [{a: [0n, 0n], b: false}, {a: [0n, 0n], b: false}, {a: [0n, 0n], b: false}], c: false});"
         "});"
         ))
+    )
+
+  (test
+    '(
+      "type Sometype = Boolean;"
+      "export circuit foo(): Sometype {"
+      "  return default<Sometype>;"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.foo(Ctxt).result).toEqual(false);"
+        "});"
+        ))
+    )
+
+  (test
+    '(
+      "new type Sometype = Boolean;"
+      "export circuit foo(): Sometype {"
+      "  return default<Sometype>;"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.foo(Ctxt).result).toEqual(false);"
+        "});"
+        ))
+    )
+
+  ; check default values of ledger-state types using resetToDefault
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "ledger field1: Counter;"
+      "ledger field2: Set<Boolean>;"
+      "ledger field3: List<Boolean>;"
+      "ledger field4: Map<Boolean, Boolean>;"
+      "ledger field5: MerkleTree<2, Boolean>;"
+      "ledger field6: HistoricMerkleTree<2, Boolean>;"
+      ""
+      "export circuit resetToDefault_counter(): [] {"
+      "  field1.resetToDefault();"
+      "  assert (field1 != 0, 'the default is 0');"
+      "}"
+      ""
+      "export circuit resetToDefault_set(): [] {"
+      "  field2.resetToDefault();"
+      "  assert (!field2.isEmpty(), 'the default is empty');"
+      "}"
+      ""
+      "export circuit resetToDefault_list(): [] {"
+      "  field3.resetToDefault();"
+      "  assert (!field3.isEmpty(), 'the default is empty');"
+      "}"
+      ""
+      "export circuit resetToDefault_map(): [] {"
+      "  field4.resetToDefault();"
+      "  assert (!field4.isEmpty(), 'the default is empty');"
+      "}"
+      ""
+      "export circuit resetToDefault_merkletree(): [] {"
+      "  field5.resetToDefault();"
+      "  assert (field5.isFull(), 'the default is empty');"
+      "}"
+      ""
+      "export circuit resetToDefault_historicmerkletree(): [] {"
+      "  field6.resetToDefault();"
+      "  assert (field6.isFull(), 'the default is empty');"
+      "}"
+      ""
+      )
+    (stage-javascript
+      '(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_counter(Ctxt)).toThrow('failed assert: the default is 0');"
+        "});"
+        "test('check 2', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_set(Ctxt)).toThrow('failed assert: the default is empty');"
+        "});"
+        "test('check 3', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_list(Ctxt)).toThrow('failed assert: the default is empty');"
+        "});"
+        "test('check 4', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_map(Ctxt)).toThrow('failed assert: the default is empty');"
+        "});"
+        "test('check 5', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_merkletree(Ctxt)).toThrow('failed assert: the default is empty');"
+        "});"
+        "test('check 6', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(() => C.circuits.resetToDefault_historicmerkletree(Ctxt)).toThrow('failed assert: the default is empty');"
+        "});"
+        ))
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "export ledger field0: Map<Boolean, Field>;"
+      "export ledger field1: Map<Boolean, Counter>;"
+      "export ledger field2: Map<Boolean, Set<Boolean>>;"
+      "export ledger field3: Map<Boolean, List<Boolean>>;"
+      "export ledger field4: Map<Boolean, Map<Boolean, Boolean>>;"
+      "export ledger field5: Map<Boolean, MerkleTree<2, Boolean>>;"
+      "export ledger field6: Map<Boolean, HistoricMerkleTree<2, Boolean>>;"
+      ""
+      "export circuit identity(q: Field): Field {"
+      "  return q;"
+      "}"
+      ""
+      "export circuit init0(b: Boolean): [] {"
+      "  field0.insert(disclose(b), default<Field>);"
+      "}"
+      ""
+      "export circuit init(b: Boolean): [] {"
+      "  field1.insert(disclose(b), default<Counter>);"
+      "  field2.insert(disclose(b), default<Set<Boolean>>);"
+      "  field3.insert(disclose(b), default<List<Boolean>>);"
+      "  field4.insert(disclose(b), default<Map<Boolean, Boolean>>);"
+      "  field5.insert(disclose(b), default<MerkleTree<2, Boolean>>);"
+      "  field6.insert(disclose(b), default<HistoricMerkleTree<2, Boolean>>);"
+      "}"
+      ""
+      "export circuit update(b: Boolean, n: Uint<16>): [] {"
+      "  field1.lookup(disclose(b)) += disclose(n);"
+      "}"
+      ""
+      "export circuit get(b: Boolean): [Uint<64>, Boolean, Boolean, Boolean, Boolean, Boolean] {"
+      "  return [ field1.lookup(disclose(b))"
+      "         , field2.lookup(disclose(b)).isEmpty()"
+      "         , field3.lookup(disclose(b)).isEmpty()"
+      "         , field4.lookup(disclose(b)).isEmpty()"
+      "         , !field5.lookup(disclose(b)).isFull()"
+      "         , !field6.lookup(disclose(b)).isFull() ];"
+      "}"
+      )
+    (stage-javascript
+      '(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  let tmp;"
+        "  tmp = C.circuits.identity(Ctxt, 73n);"
+        "  expect(tmp.result).toEqual(73n);"
+        "  tmp = C.circuits.init0(tmp.context, true);"
+        ; field0 = true, 0
+        "  expect(tmp.result).toEqual([]);"
+        "  tmp = C.circuits.init(tmp.context, true);"
+        ; fields 1 to 6 set to true and default of each type
+        "  expect(tmp.result).toEqual([]);"
+        "  tmp = C.circuits.update(tmp.context, true, 7n);"
+        ; field1 = true, 7
+        "  expect(tmp.result).toEqual([]);"
+        "  tmp = C.circuits.get(tmp.context, true);"
+        ; tests that default<Counter> is 0
+        "  expect(tmp.result).toEqual([7n, true, true, true, true, true]);"
+        "  });"
+        ))
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export circuit foo(): [] { const x = default<Kernel>; }"
+      )
+    (oops
+      message: "~a:\n  ~?"
+      irritants: '("testfile.compact line 2 char 38" "default is not defined for ADT type Kernel" ()))
     )
 
   (test
@@ -76711,7 +78433,7 @@ groups than for single tests.
         "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
         ,(format "  expect(C.circuits.foo(Ctxt, new Uint8Array([6,7,8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])).result).toEqual(~dn);" #x09080706)
         "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow(runtime.CompactError);"
-        "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 3 char 7: the integer value of 9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4 is greater than the maximum value of a Field');"
+        "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 3 char 7: byte vector [9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4] exceeds maximum value 52435875175126190479447740508185965837690552500527637822603658699938581184512 of Field type');"
         "});"
         ))
     )
@@ -76730,7 +78452,7 @@ groups than for single tests.
         "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
         ,(format "  expect(C.circuits.foo(Ctxt, new Uint8Array([6,7,8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])).result).toEqual(~dn);" #x09080706)
         "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow(runtime.CompactError);"
-        "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 3 char 7: the integer value of 9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4 is greater than the maximum value of Uint<0..4294967296>');"
+        "  expect(() => C.circuits.foo(Ctxt, new Uint8Array([9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4]))).toThrow('range error at testfile.compact line 3 char 7: byte vector [9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4,3,2,1,9,8,7,6,5,4] exceeds maximum value 4294967295 of target Uint type');"
         "});"
         ))
     )
@@ -78886,6 +80608,96 @@ groups than for single tests.
         ""
         "export declare function ledger(state: __compactRuntime.StateValue | __compactRuntime.ChargedState): Ledger;"
         "export declare const pureCircuits: PureCircuits;"))
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      ""
+      "export ledger count: Counter;"
+      ""
+      "witness get_a(): Uint<8>;"
+      "witness get_b(): Uint<8>;"
+      ""
+      "export circuit test1(): Boolean {"
+      "  count.increment(1);"
+      "  return disclose(get_a()) > disclose(get_b());"
+      "}"
+      "export circuit test2(): Boolean {"
+      "  count.increment(1);"
+      "  return disclose(get_a()) <= disclose(get_b());"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "const witnesses1 = { get_a({privateState}: runtime.WitnessContext<{}, number>): [number, bigint] { return [privateState, 3n]; }, get_b({privateState}: runtime.WitnessContext<{}, number>): [number, bigint] { return [privateState, 10n]; } };"
+        "const witnesses2 = { get_a({privateState}: runtime.WitnessContext<{}, number>): [number, bigint] { return [privateState, 10n]; }, get_b({privateState}: runtime.WitnessContext<{}, number>): [number, bigint] { return [privateState, 3n]; } };"
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, witnesses1, 0);"
+        "  expect(C.circuits.test1(Ctxt).result).toEqual(false);"
+        "  expect(C.circuits.test2(Ctxt).result).toEqual(true);"
+        "});"
+        "test('check 2', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, witnesses2, 0);"
+        "  expect(C.circuits.test1(Ctxt).result).toEqual(true);"
+        "  expect(C.circuits.test2(Ctxt).result).toEqual(false);"
+        "});"
+        ))
+    )
+
+  (test
+    '(
+      "ledger F: Field;"
+      "circuit factorial<#N>(): [] {"
+      "  F = 1;"
+      "  for (const i of 0..N) {"
+      "    F = F * (i + 1);"
+      "  }"
+      "}"
+      "export circuit foo(): Field {"
+      "  factorial<10>();"
+      "  return F;"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.foo(Ctxt).result).toEqual(3628800n);"
+        "});"
+        ))
+    )
+
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "ledger F1: Counter;"
+      "circuit foo1<#S, #E>(): Uint<64> {"
+      "  for (const i of S..E) {"
+      "    F1 += i;"
+      "  }"
+      "  return F1;"
+      "}"
+      "ledger F2: Counter;"
+      "circuit foo2<#S, #N>(): Uint<64> {"
+      "  fold((i, x) => (F2 += i, i + 1 as Uint<16>), S as Uint<16>, default<Vector<N, Field>>);"
+      "  return F2;"
+      "}"
+      "export circuit foo(): [Uint<64>, Uint<64>] {"
+      "  return [foo1<3, 10>(), foo2<3, 7>()];"
+      "}"
+      "export circuit bar(): [Uint<64>, Uint<64>] {"
+      "  return [foo1<3, 3>(), foo2<3, 0>()];"
+      "}"
+      )
+    (stage-javascript
+      `(
+        "test('check 1', () => {"
+        "  const [C, Ctxt] = startContract(contractCode, {}, 0);"
+        "  expect(C.circuits.foo(Ctxt).result).toEqual([42n, 42n]);"
+        "  expect(C.circuits.bar(Ctxt).result).toEqual([0n, 0n]);"
+        "});"
+        ))
     )
 )
 

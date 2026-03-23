@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Install Nix
-        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+        uses: cachix/install-nix-action@1ca7d21a94afc7c957383a2d217460d980de4934 # v31.10.1
         with:
           #github_access_token: ${{ secrets.MIDNIGHTCI_PACKAGES_READ }}
           nix_path: nixpkgs=channel:nixos-unstable
@@ -41,7 +41,7 @@ jobs:
           nix build .#compact-vscode-extension
 
       - name: Upload plugin
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: compact-vscode-plugin
           path: result/compact-*.vsix
@@ -58,7 +58,7 @@ jobs:
           echo "Version extracted: ${{ env.version }}"
 
       - name: Create Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           repository: midnight-ntwrk/artifacts
           tag_name: ${{ github.ref_name }}
