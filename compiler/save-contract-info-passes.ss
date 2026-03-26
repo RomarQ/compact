@@ -26,7 +26,8 @@
           (compiler-version)
           (language-version)
           (runtime-version)
-          (pass-helpers))
+          (pass-helpers)
+          (vm))
 
   ;; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir proof-circuit-name*) -> Lnodisclose ()
@@ -83,7 +84,237 @@
         (nanopass-case (Lnodisclose Type) type
           [(talias ,src ,nominal? ,type-name ,type)
            (unwrap-to-adt type)]
-          [else type])))
+          [else type]))
+
+      ;; ---------------------------------------------------------------
+      ;; Circuit IR emitter — converts Lnodisclose Expression trees
+      ;; into portable JSON IR for the "ir" field per circuit.
+      ;; ---------------------------------------------------------------
+
+      ;; Serialize a type to the IR JSON format.
+      (define (ir-type->json type)
+        (nanopass-case (Lnodisclose Type) type
+          [(tboolean ,src)     (list (cons "type" "Boolean"))]
+          [(tfield ,src)       (list (cons "type" "Field"))]
+          [(tunsigned ,src ,nat)
+           (list (cons "type" "Uint") (cons "maxval" (number->string nat)))]
+          [(tbytes ,src ,len)
+           (list (cons "type" "Bytes") (cons "length" len))]
+          [(topaque ,src ,opaque-type)
+           (list (cons "type" "Opaque") (cons "name" opaque-type))]
+          [(tvector ,src ,len ,type)
+           (list (cons "type" "Vector") (cons "length" len) (cons "element" (ir-type->json type)))]
+          [(ttuple ,src ,type* ...)
+           (list (cons "type" "Tuple") (cons "types" (list->vector (map ir-type->json type*))))]
+          [(tstruct ,src ,struct-name (,elt-name* ,type*) ...)
+           (list (cons "type" "Struct") (cons "name" (symbol->string struct-name)))]
+          [(tenum ,src ,enum-name ,elt-name ,elt-name* ...)
+           (list (cons "type" "Enum") (cons "name" (symbol->string enum-name)))]
+          [(talias ,src ,nominal? ,type-name ,type) (ir-type->json type)]
+          [else (list (cons "type" "Void"))]))
+
+      ;; Convert a VMop value to JSON-safe form.
+      (define (vmop->json v)
+        (cond
+          [(integer? v) v]
+          [(boolean? v) v]
+          [(string? v) v]
+          [(list? v) (list->vector (map vmop->json v))]
+          [(VMop? v)
+           (VMop-case v
+             [(VMstack) "stack"]
+             [(VMvoid) (void)]
+             [(VMalign value bytes)
+              (list (cons "tag" "value")
+                    (cons "value" (number->string value))
+                    (cons "type" (list (cons "type" "Uint")
+                                       (cons "maxval" (number->string (- (expt 2 (* bytes 8)) 1))))))]
+             [(VMvalue->int x) (vmop->json x)]
+             [(VMstate-value-cell val) (vmop->json val)]
+             [(VMstate-value-null) (void)]
+             [else (format "~s" v)])]
+          [else
+           (guard (c [#t (format "~s" v)])
+             (emit-ir-expr v))]))
+
+      ;; Convert a vminstr to IR LedgerOp JSON.
+      (define (vminstr->ir-json vi)
+        (let ([op (vminstr-op vi)] [args (vminstr-arg* vi)])
+          (define (get-arg name) (cdr (assoc name args)))
+          (define (has-arg? name) (assoc name args))
+          (cond
+            [(string=? op "idx")
+             (let ([cached (get-arg "cached")]
+                   [push-path (get-arg "pushPath")]
+                   [path (get-arg "path")])
+               (list (cons "op" "idx")
+                     (cons "cached" (if cached #t #f))
+                     (cons "push-path" (if push-path #t #f))
+                     (cons "path" (list->vector
+                                    (map (lambda (p)
+                                           (let ([v (vmop->json p)])
+                                             (if (and (list? v) (assoc "tag" v))
+                                                 v
+                                                 (list (cons "tag" "value")
+                                                       (cons "value" (format "~a" v))
+                                                       (cons "type" (list (cons "type" "Uint") (cons "maxval" "255")))))))
+                                         path)))))]
+            [(string=? op "addi")
+             (list (cons "op" "addi")
+                   (cons "immediate" (vmop->json (get-arg "immediate"))))]
+            [(string=? op "ins")
+             (list (cons "op" "ins")
+                   (cons "cached" (if (get-arg "cached") #t #f))
+                   (cons "n" (vmop->json (get-arg "n"))))]
+            [(string=? op "dup")     (list (cons "op" "dup"))]
+            [(string=? op "popeq")   (list (cons "op" "popeq"))]
+            [(string=? op "member")  (list (cons "op" "member"))]
+            [(string=? op "root")    (list (cons "op" "root"))]
+            [(string=? op "eq")      (list (cons "op" "eq"))]
+            [(string=? op "ckpt")    (list (cons "op" "ckpt"))]
+            [(string=? op "push")
+             (let ([storage (if (has-arg? "storage") (get-arg "storage") #f)]
+                   [value (get-arg "value")])
+               (list (cons "op" "push")
+                     (cons "storage" (if storage #t #f))
+                     (cons "value" (vmop->json value))))]
+            [(string=? op "rem")
+             (list (cons "op" "rem")
+                   (cons "cached" (if (get-arg "cached") #t #f))
+                   (cons "n" (vmop->json (get-arg "n"))))]
+            [(string=? op "noop")
+             (list (cons "op" "noop")
+                   (cons "n" (if (has-arg? "n") (get-arg "n") 0)))]
+            [else
+             (cons (cons "op" op)
+                   (map (lambda (a) (cons (car a) (vmop->json (cdr a)))) args))])))
+
+      ;; Emit an expression as IR JSON.
+      (define (emit-ir-expr expr)
+        (nanopass-case (Lnodisclose Expression) expr
+          [(var-ref ,src ,var-name)
+           (list (cons "op" "var")
+                 (cons "name" (symbol->string (id-sym var-name))))]
+          [(quote ,src ,datum)
+           (list (cons "op" "lit")
+                 (cons "type" (list (cons "type" "Void")))
+                 (cons "value" (format "~a" datum)))]
+          [(assert ,src ,expr ,mesg)
+           (list (cons "op" "assert")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "message" mesg))]
+          [(if ,src ,expr0 ,expr1 ,expr2)
+           (list (cons "op" "if-expr")
+                 (cons "cond" (emit-ir-expr expr0))
+                 (cons "then" (emit-ir-expr expr1))
+                 (cons "else" (emit-ir-expr expr2)))]
+          [(+ ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "add")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(- ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "sub")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(* ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "mul")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(== ,src ,type ,expr1 ,expr2)
+           (list (cons "op" "eq")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(< ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "lt")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(elt-ref ,src ,expr ,elt-name ,nat)
+           (list (cons "op" "field")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "name" (symbol->string elt-name)))]
+          [(tuple-ref ,src ,expr ,kindex)
+           (list (cons "op" "index")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "index" kindex))]
+          [(enum-ref ,src ,type ,elt-name)
+           (list (cons "op" "lit")
+                 (cons "type" (ir-type->json type))
+                 (cons "value" (symbol->string elt-name)))]
+          [(call ,src ,function-name ,expr* ...)
+           (let ([name (symbol->string (id-sym function-name))])
+             (list (cons "op" (if (id-pure? function-name) "call-pure" "call-witness"))
+                   (cons "name" name)
+                   (cons "args" (list->vector (map emit-ir-expr expr*)))
+                   (cons "result-type" (list (cons "type" "Void")))))]
+          [(let* ,src ([,local* ,expr*] ...) ,expr)
+           (let ([let-stmts (map (lambda (loc bind-expr)
+                                   (let ([name (nanopass-case (Lnodisclose Argument) loc
+                                                 [(,var-name ,type)
+                                                  (symbol->string (id-sym var-name))])])
+                                     (list (cons "op" "let")
+                                           (cons "name" name)
+                                           (cons "value" (emit-ir-expr bind-expr)))))
+                                 local* expr*)]
+                 [body-expr (emit-ir-expr expr)])
+             (if (null? let-stmts)
+                 body-expr
+                 (list (cons "op" "let-expr")
+                       (cons "bindings" (list->vector let-stmts))
+                       (cons "body" body-expr))))]
+          [(public-ledger ,src ,ledger-field-name ,sugar (,path-elt* ...) ,src^ ,adt-op ,expr* ...)
+           (nanopass-case (Lnodisclose ADT-Op) adt-op
+             [(,ledger-op ,op-class (,adt-name (,adt-formal* ,adt-arg*) ...) ((,var-name* ,type*) ...) ,type ,vm-code)
+              (let* ([path-vals (map (lambda (pe)
+                                       (nanopass-case (Lnodisclose Path-Element) pe
+                                         [,path-index (VMalign path-index 1)]
+                                         [(,src ,type ,expr) (emit-ir-expr expr)]))
+                                     path-elt*)]
+                     [arg-alist (append
+                                  (map (lambda (f a) (cons f a)) adt-formal* adt-arg*)
+                                  (map (lambda (vn ex) (cons (id-sym vn) ex)) var-name* expr*))]
+                     [result-type (ir-type->json type)]
+                     [vminstr* (expand-vm-code src path-vals #f arg-alist (vm-code-code vm-code))]
+                     [json-ops (fold-right
+                                 (lambda (vi acc)
+                                   (guard (c [#t acc])
+                                     (cons (vminstr->ir-json vi) acc)))
+                                 '()
+                                 vminstr*)])
+                (list (cons "op" "ledger-query")
+                      (cons "ops" (list->vector json-ops))
+                      (cons "result-type" result-type)))])]
+          [(default ,src ,type)
+           (list (cons "op" "default") (cons "type" (ir-type->json type)))]
+          [(seq ,src ,expr* ... ,expr)
+           (emit-ir-expr expr)]
+          [(return ,src ,expr)
+           (emit-ir-expr expr)]
+          [(safe-cast ,src ,type ,type^ ,expr)
+           (emit-ir-expr expr)]
+          [(tuple ,src ,tuple-arg* ...)
+           (list (cons "op" "lit")
+                 (cons "type" (list (cons "type" "Tuple") (cons "types" (list->vector '()))))
+                 (cons "value" ""))]
+          [else
+           (list (cons "op" "lit")
+                 (cons "type" (list (cons "type" "Void")))
+                 (cons "value" ""))]))
+
+      ;; Emit a circuit body expression as a statement tree.
+      (define (emit-ir-body the-expr)
+        (nanopass-case (Lnodisclose Expression) the-expr
+          [(seq ,src ,expr* ... ,expr)
+           (let ([stmts (map (lambda (e)
+                               (list (cons "op" "expr-stmt")
+                                     (cons "expr" (emit-ir-expr e))))
+                             (append expr* (list expr)))])
+             (list (cons "op" "seq")
+                   (cons "stmts" (list->vector stmts))))]
+          [else
+           (list (cons "op" "seq")
+                 (cons "stmts" (list->vector
+                                 (list (list (cons "op" "expr-stmt")
+                                             (cons "expr" (emit-ir-expr the-expr)))))))])))
 
     (Program : Program (ir) -> Program ()
       [(program ,src (,contract-name* ...) ((,export-name* ,name*) ...) ,pelt* ...)
@@ -185,7 +416,15 @@
                  (list->vector (map Argument arg*)))
                (cons
                  "result-type"
-                 (Type type)))
+                 (Type type))
+               (cons
+                 "ir"
+                 (if (and (not (id-pure? function-name))
+                          (memq (id-sym function-name) proof-circuit-name*))
+                     (list
+                       (cons "body" (emit-ir-body expr))
+                       (cons "result" (void)))
+                     (void))))
              circuit*))
          circuit*
          (external-names function-name))]
