@@ -57,12 +57,14 @@
       (define (serialize-adt key adt-name adt-arg*)
         (let ([cleaned (clean-adt-name adt-name)])
           (cons
-            (cons key (symbol->string cleaned))
+            (cons key (string-downcase (symbol->string cleaned)))
             (case cleaned
               [(Cell)
                (list (cons "type" (adt-arg->json (car adt-arg*))))]
               [(Counter)
-               '()]
+               ;; Counter wraps u64 — emit the type so bindgen generates typed accessors
+               (list (cons "type" (list (cons "type-name" "Uint")
+                                        (cons "maxval" 18446744073709551615))))]
               [(Map)
                (list (cons "key" (adt-arg->json (car adt-arg*)))
                      (cons "value" (adt-arg->json (cadr adt-arg*))))]
@@ -124,6 +126,7 @@
            (VMop-case v
              [(VMstack) "stack"]
              [(VMvoid) (void)]
+             [(VMsuppress) (void)]
              [(VMalign value bytes)
               (list (cons "tag" "value")
                     (cons "value" (number->string value))
@@ -163,9 +166,13 @@
              (list (cons "op" "addi")
                    (cons "immediate" (vmop->json (get-arg "immediate"))))]
             [(string=? op "ins")
-             (list (cons "op" "ins")
-                   (cons "cached" (if (get-arg "cached") #t #f))
-                   (cons "n" (vmop->json (get-arg "n"))))]
+             (let ([n-val (vmop->json (get-arg "n"))])
+               ;; Skip suppressed ins (n = void/null)
+               (if (or (eq? n-val (void)) (not (integer? n-val)))
+                   (error 'vminstr->ir-json "suppressed ins op")
+                   (list (cons "op" "ins")
+                         (cons "cached" (if (get-arg "cached") #t #f))
+                         (cons "n" n-val))))]
             [(string=? op "dup")     (list (cons "op" "dup"))]
             [(string=? op "popeq")   (list (cons "op" "popeq"))]
             [(string=? op "member")  (list (cons "op" "member"))]
@@ -346,7 +353,34 @@
                (list->vector (map symbol->string contract-name*)))
              (cons
                "ledger"
-               (list->vector (fold-right LedgerField '() pelt*))))))
+               (list->vector (fold-right LedgerField '() pelt*)))
+             (cons
+               "helpers"
+               ;; Collect all internal circuit/function bodies as helpers.
+               ;; These are pure functions referenced by impure circuits.
+               (let ([helpers '()])
+                 (for-each
+                   (lambda (pelt)
+                     (nanopass-case (Lnodisclose Program-Element) pelt
+                       [(circuit ,src ,function-name (,arg* ...) ,type ,expr)
+                        ;; Include all circuits as potential helpers
+                        (let* ([name (symbol->string (id-sym function-name))]
+                               [params (map (lambda (a)
+                                              (nanopass-case (Lnodisclose Argument) a
+                                                [(,var-name ,type)
+                                                 (list (cons "name" (symbol->string (id-sym var-name)))
+                                                       (cons "type" (ir-type->json type)))]))
+                                            arg*)])
+                          (set! helpers
+                            (cons
+                              (list (cons "name" name)
+                                    (cons "params" (list->vector params))
+                                    (cons "body" (emit-ir-body expr))
+                                    (cons "result" (void)))
+                              helpers)))]
+                       [else (void)]))
+                   pelt*)
+                 (list->vector helpers))))))
        ir])
     (Witness : Program-Element (ir witness*) -> * (json)
       [(witness ,src ,function-name (,arg* ...) ,type)
