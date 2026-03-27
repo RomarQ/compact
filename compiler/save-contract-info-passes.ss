@@ -62,9 +62,7 @@
               [(Cell)
                (list (cons "type" (adt-arg->json (car adt-arg*))))]
               [(Counter)
-               ;; Counter wraps u64 — emit the type so bindgen generates typed accessors
-               (list (cons "type" (list (cons "type-name" "Uint")
-                                        (cons "maxval" 18446744073709551615))))]
+               '()]
               [(Map)
                (list (cons "key" (adt-arg->json (car adt-arg*)))
                      (cons "value" (adt-arg->json (cadr adt-arg*))))]
