@@ -30,6 +30,110 @@
 
   ; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir proof-circuit-name*) -> Lnodisclose ()
+    (definitions
+      ; Collect all Public-Ledger-Bindings from a Public-Ledger-Array, flattening nested arrays
+      (define (collect-pl-array pl-array)
+        (nanopass-case (Lnodisclose Public-Ledger-Array) pl-array
+          [(public-ledger-array ,pl-array-elt* ...)
+           (fold-right
+             (lambda (elt acc)
+               (nanopass-case (Lnodisclose Public-Ledger-Array-Element) elt
+                 [,pl-array^ (append (collect-pl-array pl-array^) acc)]
+                 [,public-binding (cons (ledger-binding-json public-binding) acc)]))
+             '()
+             pl-array-elt*)]))
+      ; Convert a Public-Ledger-Binding to a JSON object (list of key-value pairs)
+      (define (ledger-binding-json public-binding)
+        (nanopass-case (Lnodisclose Public-Ledger-Binding) public-binding
+          [(,src ,ledger-field-name (,path-index* ...) ,type)
+           (cons*
+             (cons "name" (symbol->string (id-sym ledger-field-name)))
+             (cons "index" (car path-index*))
+             (tadt-storage-json type))]))
+      ; Convert a tadt type to a list of key-value pairs describing its storage kind and type args
+      (define (tadt-storage-json type)
+        (nanopass-case (Lnodisclose Type) type
+          [(talias ,src ,nominal? ,type-name ,inner-type)
+           (tadt-storage-json inner-type)]
+          [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
+           (case adt-name
+             [(__compact_Cell)
+              (list
+                (cons "storage" "cell")
+                (cons "type" (adt-arg-json (car adt-arg*))))]
+             [(Counter)
+              (list
+                (cons "storage" "counter"))]
+             [(Set)
+              (list
+                (cons "storage" "set")
+                (cons "element-type" (adt-arg-json (car adt-arg*))))]
+             [(Map)
+              (list
+                (cons "storage" "map")
+                (cons "key-type" (adt-arg-json (car adt-arg*)))
+                (cons "value-type" (adt-arg-json (cadr adt-arg*))))]
+             [(MerkleTree)
+              (list
+                (cons "storage" "merkle-tree")
+                (cons "depth" (adt-arg-json (car adt-arg*)))
+                (cons "type" (adt-arg-json (cadr adt-arg*))))]
+             [else
+              (list
+                (cons "storage" (string-downcase (symbol->string adt-name))))])]
+          [else (assert cannot-happen)]))
+      ; Convert a Public-Ledger-ADT-Arg to a JSON value
+      (define (adt-arg-json adt-arg)
+        (nanopass-case (Lnodisclose Public-Ledger-ADT-Arg) adt-arg
+          [,nat nat]
+          [,type (adt-type-json type)]))
+      ; Convert a type that may be a tadt (for nested ADTs) or a regular type to JSON
+      (define (adt-type-json type)
+        (nanopass-case (Lnodisclose Type) type
+          [(talias ,src ,nominal? ,type-name ,inner-type)
+           (if nominal?
+               (list
+                 (cons "type-name" "Alias")
+                 (cons "name" (symbol->string type-name))
+                 (cons "type" (adt-type-json inner-type)))
+               (adt-type-json inner-type))]
+          [(tadt ,src ,adt-name ([,adt-formal* ,adt-arg*] ...) ,vm-expr (,adt-op* ...) (,adt-rt-op* ...))
+           (case adt-name
+             [(__compact_Cell)
+              (list
+                (cons "storage" "cell")
+                (cons "type" (adt-arg-json (car adt-arg*))))]
+             [(Counter)
+              (list
+                (cons "storage" "counter"))]
+             [(Set)
+              (list
+                (cons "storage" "set")
+                (cons "element-type" (adt-arg-json (car adt-arg*))))]
+             [(Map)
+              (list
+                (cons "storage" "map")
+                (cons "key-type" (adt-arg-json (car adt-arg*)))
+                (cons "value-type" (adt-arg-json (cadr adt-arg*))))]
+             [(MerkleTree)
+              (list
+                (cons "storage" "merkle-tree")
+                (cons "depth" (adt-arg-json (car adt-arg*)))
+                (cons "type" (adt-arg-json (cadr adt-arg*))))]
+             [else
+              (list
+                (cons "storage" (string-downcase (symbol->string adt-name))))])]
+          [else (Type type)]))
+      ; Collect ledger bindings from a list of program elements
+      (define (collect-ledger pelt*)
+        (fold-right
+          (lambda (pelt acc)
+            (nanopass-case (Lnodisclose Program-Element) pelt
+              [(public-ledger-declaration ,pl-array ,lconstructor)
+               (append (collect-pl-array pl-array) acc)]
+              [else acc]))
+          '()
+          pelt*)))
     (Program : Program (ir) -> Program ()
       [(program ,src (,contract-name* ...) ((,export-name* ,name*) ...) ,pelt* ...)
        (let ([op (get-target-port 'contract-info.json)])
@@ -57,7 +161,10 @@
                (list->vector (fold-right Witness '() pelt*)))
              (cons
                "contracts"
-               (list->vector (map symbol->string contract-name*))))))
+               (list->vector (map symbol->string contract-name*)))
+             (cons
+               "ledger"
+               (list->vector (collect-ledger pelt*))))))
        ir])
     (Witness : Program-Element (ir witness*) -> * (json)
       [(witness ,src ,function-name (,arg* ...) ,type)
