@@ -26,7 +26,8 @@
           (compiler-version)
           (language-version)
           (runtime-version)
-          (pass-helpers))
+          (pass-helpers)
+          (vm))
 
   ; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir novectorref-ir proof-circuit-name*) -> Lnodisclose ()
@@ -83,10 +84,530 @@
         (nanopass-case (Lnodisclose Type) type
           [(talias ,src ,nominal? ,type-name ,type)
            (unwrap-to-adt type)]
-          [else type])))
+          [else type]))
+
+      ;; ---------------------------------------------------------------
+      ;; Circuit IR emitter — converts Lnodisclose Expression trees
+      ;; into portable JSON IR for the "ir" field per circuit.
+      ;; Pure function calls are inlined (like the TypeScript backend).
+      ;; ---------------------------------------------------------------
+
+      ;; Map circuit-name-symbol → lowered (Lnovectorref) body expression,
+      ;; populated from the lowered circuit program. This is the source of each
+      ;; circuit's `ir` field: the body with enums resolved, loops unrolled,
+      ;; helpers inlined and safe-casts removed by circuit-passes.
+      (define lowered-body-table (make-eq-hashtable))
+
+      ;; Signature table: function-name-symbol → (class result-type)
+      ;; where class is one of 'native-circuit, 'native-witness, 'witness-decl.
+      ;; Populated from Lnodisclose Program-Element `native` and `witness`
+      ;; declarations. Used by the `(call ...)` IR emitter to decide between
+      ;; emitting `call-pure` (native circuit builtins like `transientHash`,
+      ;; `ecMul`, `jubjubPointX`, ...) and `call-witness` (truly external
+      ;; private-state callbacks), and to attach the correct result-type.
+      (define signature-table (make-eq-hashtable))
+
+      ;; Struct table: struct-name-symbol → vector of field JSON objects.
+      ;; Populated as a side effect of `ir-type->json` walking struct types.
+      ;; Each field is `{name, type}`. Emitted as a top-level `structs` array
+      ;; in contract-info.json so the IR consumer can compute atom layouts
+      ;; for Value::AlignedValue field slicing.
+      (define struct-table (make-eq-hashtable))
+
+      ;; Serialize a lowered (Lnovectorref) type to the IR JSON format.
+      (define (ir-type->json type)
+        (nanopass-case (Lnovectorref Type) type
+          [(tboolean ,src)     (list (cons "type" "Boolean"))]
+          [(tfield ,src)       (list (cons "type" "Field"))]
+          [(tunsigned ,src ,nat)
+           (list (cons "type" "Uint") (cons "maxval" (number->string nat)))]
+          [(tbytes ,src ,len)
+           (list (cons "type" "Bytes") (cons "length" len))]
+          [(topaque ,src ,opaque-type)
+           (list (cons "type" "Opaque") (cons "name" opaque-type))]
+          [(tvector ,src ,len ,type)
+           (list (cons "type" "Vector") (cons "length" len) (cons "element" (ir-type->json type)))]
+          [(ttuple ,src ,type* ...)
+           (list (cons "type" "Tuple") (cons "types" (list->vector (map ir-type->json type*))))]
+          [(tstruct ,src ,struct-name (,elt-name* ,type*) ...)
+           ;; Monomorphize parametric structs (e.g. `Maybe<T>`) so each
+           ;; instantiation gets its own entry in `struct-table`. We key
+           ;; on `(struct-name + field-type-fingerprint)` so structurally
+           ;; identical instantiations dedupe but different ones don't
+           ;; collide.
+           ;;
+           ;; The fingerprint is the string concatenation of each field
+           ;; type's JSON, recursed via `ir-type->json`. For non-parametric
+           ;; structs the fingerprint is constant across all references and
+           ;; the original name wins; for parametric ones we suffix with a
+           ;; per-fingerprint counter so the consumer sees distinct names
+           ;; like `Maybe`, `Maybe_2`, etc.
+           (let* ([base-name (symbol->string struct-name)]
+                  [field-jsons (map (lambda (t) (ir-type->json t)) type*)]
+                  [fingerprint
+                   (let ([sp (open-output-string)])
+                     (for-each
+                       (lambda (n j)
+                         (put-string sp (symbol->string n))
+                         (put-string sp ":")
+                         (put-string sp (format "~s" j))
+                         (put-string sp ";"))
+                       elt-name* field-jsons)
+                     (get-output-string sp))]
+                  [key (string->symbol (string-append base-name "$" fingerprint))]
+                  [unique-name
+                   (cond
+                     [(hashtable-ref struct-table key #f) =>
+                      (lambda (entry) (car entry))]
+                     [else
+                      ;; First time we see this fingerprint — pick a name
+                      ;; that doesn't collide with any other already-named
+                      ;; struct with a different fingerprint.
+                      (let loop ([candidate base-name] [n 1])
+                        (let ([taken? #f])
+                          (let-values ([(keys vals) (hashtable-entries struct-table)])
+                            (vector-for-each
+                              (lambda (v)
+                                (when (and (pair? v)
+                                           (string=? (car v) candidate))
+                                  (set! taken? #t)))
+                              vals))
+                          (if taken?
+                              (loop (string-append base-name "_" (number->string (+ n 1))) (+ n 1))
+                              candidate)))])])
+             (unless (hashtable-contains? struct-table key)
+               ;; Insert placeholder first to break recursion through
+               ;; nested struct fields that may reference this same type.
+               (hashtable-set! struct-table key (list unique-name #f))
+               (let ([fields (map (lambda (n j)
+                                    (list (cons "name" (symbol->string n))
+                                          (cons "type" j)))
+                                  elt-name* field-jsons)])
+                 (hashtable-set! struct-table key (list unique-name (list->vector fields)))))
+             (list (cons "type" "Struct") (cons "name" unique-name)))]
+          [else (list (cons "type" "Void"))]))
+
+      ;; Convert a VMop value to JSON-safe form.
+      (define (vmop->json v)
+        (cond
+          [(integer? v) v]
+          [(boolean? v) v]
+          [(string? v) v]
+          [(list? v) (list->vector (map vmop->json v))]
+          [(VMop? v)
+           (VMop-case v
+             [(VMstack) "stack"]
+             [(VMvoid) (void)]
+             [(VMsuppress) (void)]
+             [(VMalign value bytes)
+              (list (cons "tag" "value")
+                    (cons "value" (number->string value))
+                    (cons "type" (list (cons "type" "Uint")
+                                       (cons "maxval" (number->string (- (expt 2 (* bytes 8)) 1))))))]
+             [(VMvalue->int x) (vmop->json x)]
+             [(VMstate-value-cell val) (vmop->json val)]
+             [(VMstate-value-null) (void)]
+             [(VMstate-value-ADT val type)
+              ;; A cell containing a structured (struct/tuple/etc) value.
+              ;; We don't have the static type information needed to encode
+              ;; the inner value at this layer, so emit it as an `expr`
+              ;; reference that the consumer evaluates at runtime. The val
+              ;; is typically an Lnodisclose Expression (e.g. a var-ref to
+              ;; a let-bound struct literal).
+              (vmop->json val)]
+             [else (format "~s" v)])]
+          [else
+           (guard (c [#t (format "~s" v)])
+             (emit-ir-expr v))]))
+
+      ;; Convert a vminstr to IR LedgerOp JSON.
+      (define (vminstr->ir-json vi)
+        (let ([op (vminstr-op vi)] [args (vminstr-arg* vi)])
+          (define (get-arg name) (cdr (assoc name args)))
+          (define (has-arg? name) (assoc name args))
+          (cond
+            [(string=? op "idx")
+             (let ([cached (get-arg "cached")]
+                   [push-path (get-arg "pushPath")]
+                   [path (get-arg "path")])
+               (list (cons "op" "idx")
+                     (cons "cached" (if cached #t #f))
+                     (cons "push-path" (if push-path #t #f))
+                     (cons "path" (list->vector
+                                    (map (lambda (p)
+                                           (let ([v (vmop->json p)])
+                                             (if (and (list? v) (assoc "tag" v))
+                                                 v
+                                                 (list (cons "tag" "value")
+                                                       (cons "value" (format "~a" v))
+                                                       (cons "type" (list (cons "type" "Uint") (cons "maxval" "255")))))))
+                                         path)))))]
+            [(string=? op "addi")
+             (list (cons "op" "addi")
+                   (cons "immediate" (vmop->json (get-arg "immediate"))))]
+            [(string=? op "ins")
+             (let ([n-val (vmop->json (get-arg "n"))])
+               ;; Skip suppressed ins (n = void/null)
+               (if (or (eq? n-val (void)) (not (integer? n-val)))
+                   (error 'vminstr->ir-json "suppressed ins op")
+                   (list (cons "op" "ins")
+                         (cons "cached" (if (get-arg "cached") #t #f))
+                         (cons "n" n-val))))]
+            [(string=? op "dup")     (list (cons "op" "dup"))]
+            [(string=? op "popeq")
+             (list (cons "op" "popeq")
+                   (cons "cached" (if (has-arg? "cached")
+                                      (if (get-arg "cached") #t #f)
+                                      #f)))]
+            [(string=? op "member")  (list (cons "op" "member"))]
+            [(string=? op "root")    (list (cons "op" "root"))]
+            [(string=? op "eq")      (list (cons "op" "eq"))]
+            [(string=? op "ckpt")    (list (cons "op" "ckpt"))]
+            [(string=? op "push")
+             (let ([storage (if (has-arg? "storage") (get-arg "storage") #f)]
+                   [value (get-arg "value")])
+               (list (cons "op" "push")
+                     (cons "storage" (if storage #t #f))
+                     (cons "value" (vmop->json value))))]
+            [(string=? op "rem")
+             (list (cons "op" "rem")
+                   (cons "cached" (if (get-arg "cached") #t #f))
+                   (cons "n" (vmop->json (get-arg "n"))))]
+            [(string=? op "noop")
+             (list (cons "op" "noop")
+                   (cons "n" (if (has-arg? "n") (get-arg "n") 0)))]
+            [else
+             (cons (cons "op" op)
+                   (map (lambda (a) (cons (car a) (vmop->json (cdr a)))) args))])))
+
+
+      ;; Emit a lowered (Lnovectorref) expression as IR JSON. Enums, map/fold,
+      ;; helper calls and safe-casts are already lowered away by circuit-passes,
+      ;; so this only handles the post-lowering expression forms.
+      (define (emit-ir-expr expr)
+        (nanopass-case (Lnovectorref Expression) expr
+          [(var-ref ,src ,var-name)
+           (list (cons "op" "var")
+                 (cons "name" (symbol->string (id-sym var-name))))]
+          [(quote ,src ,datum)
+           ;; Emit a typed literal so the IR consumer can decode it.
+           ;; `(quote)` datums in Lnodisclose are produced by `lparser-to-lsrc`
+           ;; for boolean (`#t`/`#f`), field-element (integer), and
+           ;; byte-string (bytevector, from `string` / `pad`) source forms.
+           (cond
+             [(boolean? datum)
+              (list (cons "op" "lit")
+                    (cons "type" (list (cons "type" "Boolean")))
+                    (cons "value" (if datum "true" "false")))]
+             [(integer? datum)
+              (list (cons "op" "lit")
+                    (cons "type" (list (cons "type" "Field")))
+                    (cons "value" (number->string datum)))]
+             [(bytevector? datum)
+              (let ([len (bytevector-length datum)])
+                (list (cons "op" "lit")
+                      (cons "type" (list (cons "type" "Bytes")
+                                         (cons "length" len)))
+                      ;; Hex-encoded big-endian bytes (no `0x` prefix). The
+                      ;; consumer parses this back into a `[u8; length]`.
+                      (cons "value"
+                            (apply string-append
+                                   (map (lambda (b)
+                                          (let ([s (number->string b 16)])
+                                            (if (< b 16)
+                                                (string-append "0" s)
+                                                s)))
+                                        (bytevector->u8-list datum))))))]
+             [else
+              ;; Unknown datum shape — fall back to Void so the consumer
+              ;; can at least see something, but this is a compiler bug.
+              (list (cons "op" "lit")
+                    (cons "type" (list (cons "type" "Void")))
+                    (cons "value" (format "~a" datum)))])]
+          [(assert ,src ,expr ,mesg)
+           (list (cons "op" "assert")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "message" mesg))]
+          [(if ,src ,expr0 ,expr1 ,expr2)
+           (list (cons "op" "if-expr")
+                 (cons "cond" (emit-ir-expr expr0))
+                 (cons "then" (emit-ir-expr expr1))
+                 (cons "else" (emit-ir-expr expr2)))]
+          [(+ ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "add")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(- ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "sub")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(* ,src ,mbits ,expr1 ,expr2)
+           (list (cons "op" "mul")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(== ,src ,type ,expr1 ,expr2)
+           (list (cons "op" "eq")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(< ,src ,bits ,expr1 ,expr2)
+           (list (cons "op" "lt")
+                 (cons "left" (emit-ir-expr expr1))
+                 (cons "right" (emit-ir-expr expr2)))]
+          [(elt-ref ,src ,expr ,elt-name)
+           (list (cons "op" "field")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "name" (symbol->string elt-name)))]
+          [(tuple-ref ,src ,expr ,kindex)
+           (list (cons "op" "index")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "index" kindex))]
+          [(bytes-ref ,src ,expr ,nat)
+           ;; Byte access `expr[nat]` on a Bytes value at constant index `nat`.
+           (list (cons "op" "index")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "index" nat))]
+          [(call ,src ,function-name ,expr* ...)
+           (let* ([name (symbol->string (id-sym function-name))]
+                  [fn-sym (id-sym function-name)]
+                  [json-args (list->vector (map emit-ir-expr expr*))])
+             (cond
+               ;; Native builtin or witness declaration: dispatch by class.
+               ;; (User-defined helper circuits are inlined away by this stage.)
+               [(hashtable-contains? signature-table fn-sym)
+                (let* ([sig (hashtable-ref signature-table fn-sym #f)]
+                       [cls (car sig)]
+                       [result-type (cadr sig)])
+                  (case cls
+                    [(native-circuit)
+                     ;; Pure builtin (transientHash, ecMul, ...). Emit
+                     ;; call-pure so the interpreter resolves it via
+                     ;; try_builtin.
+                     (list (cons "op" "call-pure")
+                           (cons "name" name)
+                           (cons "args" json-args)
+                           (cons "result-type" (ir-type->json result-type)))]
+                    [else
+                     ;; native-witness or user witness declaration:
+                     ;; private-state callback. Emit call-witness with
+                     ;; real args and the declared result type.
+                     (list (cons "op" "call-witness")
+                           (cons "name" name)
+                           (cons "args" json-args)
+                           (cons "result-type" (ir-type->json result-type)))]))]
+               [else
+                ;; Last resort: unknown function. Emit a Void-typed
+                ;; call-witness so the consumer at least sees the call.
+                (fprintf (current-error-port)
+                         "save-contract-info: unknown function ~a, emitting Void call-witness~n"
+                         name)
+                (list (cons "op" "call-witness")
+                      (cons "name" name)
+                      (cons "args" json-args)
+                      (cons "result-type" (list (cons "type" "Void"))))]))]
+          [(let* ,src ([,local* ,expr*] ...) ,expr)
+           (let ([let-stmts (map (lambda (loc bind-expr)
+                                   (let ([name (nanopass-case (Lnovectorref Argument) loc
+                                                 [(,var-name ,type)
+                                                  (symbol->string (id-sym var-name))])])
+                                     (list (cons "op" "let")
+                                           (cons "name" name)
+                                           (cons "value" (emit-ir-expr bind-expr)))))
+                                 local* expr*)]
+                 [body-expr (emit-ir-expr expr)])
+             (if (null? let-stmts)
+                 body-expr
+                 (list (cons "op" "let-expr")
+                       (cons "bindings" (list->vector let-stmts))
+                       (cons "body" body-expr))))]
+          [(public-ledger ,src ,ledger-field-name ,sugar (,path-elt* ...) ,src^ ,adt-op ,expr* ...)
+           (nanopass-case (Lnovectorref ADT-Op) adt-op
+             [(,ledger-op ,op-class (,adt-name (,adt-formal* ,adt-arg*) ...) ((,var-name* ,type*) ...) ,type ,vm-code)
+              (let* ([path-vals (map (lambda (pe)
+                                       (nanopass-case (Lnovectorref Path-Element) pe
+                                         [,path-index (VMalign path-index 1)]
+                                         [(,src ,type ,expr) (emit-ir-expr expr)]))
+                                     path-elt*)]
+                     [arg-alist (append
+                                  (map (lambda (f a) (cons f a)) adt-formal* adt-arg*)
+                                  (map (lambda (vn ex) (cons (id-sym vn) ex)) var-name* expr*))]
+                     [result-type (ir-type->json type)]
+                     [vminstr* (expand-vm-code src path-vals #f arg-alist (vm-code-code vm-code))]
+                     [json-ops (fold-right
+                                 (lambda (vi acc)
+                                   (guard (c [#t acc])
+                                     (cons (vminstr->ir-json vi) acc)))
+                                 '()
+                                 vminstr*)])
+                (list (cons "op" "ledger-query")
+                      (cons "ops" (list->vector json-ops))
+                      (cons "result-type" result-type)))])]
+          [(default ,src ,type)
+           (list (cons "op" "default") (cons "type" (ir-type->json type)))]
+          [(seq ,src ,expr* ... ,expr)
+           ;; Lower a seq in expression position to a let-expr chain so the
+           ;; consumer (which only understands let-expr in expression
+           ;; position) sees every sub-expression in source order. Each
+           ;; non-final expression is bound to a fresh discard name; the
+           ;; final expression becomes the body.
+           (let loop ([rest expr*] [n 0])
+             (if (null? rest)
+                 (emit-ir-expr expr)
+                 (list (cons "op" "let-expr")
+                       (cons "bindings"
+                             (list->vector
+                               (list (list (cons "op" "let")
+                                           (cons "name" (format "__seq_~a" n))
+                                           (cons "value" (emit-ir-expr (car rest)))))))
+                       (cons "body" (loop (cdr rest) (+ n 1))))))]
+          [(new ,src ,type ,expr* ...)
+           ;; Struct literal: `StructName { field0: e0, field1: e1, ... }`.
+           ;; Emit a `new` op carrying the struct's TypeRef and the field
+           ;; expressions in declaration order. The interpreter uses the
+           ;; type to look up the struct layout and encode each element
+           ;; with the correct per-field alignment — necessary so that
+           ;; e.g. `amount: Uint<128>` encodes as 16 bytes, not the 8 bytes
+           ;; that `Value::Integer` would default to.
+           (list (cons "op" "new")
+                 (cons "type" (ir-type->json type))
+                 (cons "elements"
+                       (list->vector (map emit-ir-expr expr*))))]
+          [(downcast-unsigned ,src ,nat? ,nat ,expr)
+           ;; `expr as Uint<maxval>` — narrowing cast. `nat` is the target
+           ;; type's `maxval`, not its bit width (see circuit-passes.ss:57).
+           ;; `nat?` is the optional secondary bound added upstream; unused here.
+           ;; Ship as a `cast` op; the consumer passes the inner value
+           ;; through unchanged at runtime. We don't have the source type
+           ;; here, so use a generous Field for `from`.
+           (list (cons "op" "cast")
+                 (cons "expr" (emit-ir-expr expr))
+                 (cons "from" (list (cons "type" "Field")))
+                 (cons "to" (list (cons "type" "Uint")
+                                  (cons "maxval" (number->string nat)))))]
+          [(tuple ,src ,tuple-arg* ...)
+           ;; An empty tuple is the Compact unit value; emit a Void lit so the
+           ;; consumer treats it as Value::Void. A non-empty tuple becomes a
+           ;; structured `op:tuple` with each element evaluated.
+           (if (null? tuple-arg*)
+               (list (cons "op" "lit")
+                     (cons "type" (list (cons "type" "Void")))
+                     (cons "value" ""))
+               (list (cons "op" "tuple")
+                     (cons "elements"
+                           (list->vector
+                             (map (lambda (ta)
+                                    (nanopass-case (Lnovectorref Tuple-Argument) ta
+                                      [(single ,src ,expr) (emit-ir-expr expr)]
+                                      [(spread ,src ,nat ,expr)
+                                       (list (cons "op" "spread")
+                                             (cons "length" nat)
+                                             (cons "expr" (emit-ir-expr expr)))]))
+                                  tuple-arg*)))))]
+          [(vector ,src ,tuple-arg* ...)
+           ;; Vector literal — Compact's `Vector<N, T>` is laid out as a
+           ;; tuple at the IR level (the consumer indexes it via `index`).
+           ;; Emit `op:tuple` with one element per source element. Each
+           ;; source element is a `Tuple-Argument` node; we recurse through
+           ;; its inner expression.
+           (list (cons "op" "tuple")
+                 (cons "elements"
+                       (list->vector
+                         (map (lambda (ta)
+                                (nanopass-case (Lnovectorref Tuple-Argument) ta
+                                  [(single ,src ,expr) (emit-ir-expr expr)]
+                                  [(spread ,src ,nat ,expr)
+                                   (list (cons "op" "spread")
+                                         (cons "length" nat)
+                                         (cons "expr" (emit-ir-expr expr)))]))
+                              tuple-arg*))))]
+          [(bytes->field ,src ,len ,expr)
+           ;; Reinterpret a Bytes value as a Field element.
+           (list (cons "op" "bytes-to-field")
+                 (cons "length" len)
+                 (cons "expr" (emit-ir-expr expr)))]
+          [(field->bytes ,src ,len ,expr)
+           ;; Reinterpret a Field element as a Bytes value.
+           (list (cons "op" "field-to-bytes")
+                 (cons "length" len)
+                 (cons "expr" (emit-ir-expr expr)))]
+          [(bytes->vector ,src ,len ,expr)
+           ;; View a Bytes value as Vector<len, Uint<255>>.
+           (list (cons "op" "bytes-to-vector")
+                 (cons "length" len)
+                 (cons "expr" (emit-ir-expr expr)))]
+          [(vector->bytes ,src ,len ,expr)
+           ;; View a Vector<len, Uint<255>> as Bytes.
+           (list (cons "op" "vector-to-bytes")
+                 (cons "length" len)
+                 (cons "expr" (emit-ir-expr expr)))]
+          [(contract-call ,src ,elt-name (,expr ,type) ,expr* ...)
+           ;; Cross-contract circuit invocation: call `elt-name` on the
+           ;; contract value `expr` (of type `type`) with arguments.
+           (list (cons "op" "contract-call")
+                 (cons "circuit" (symbol->string elt-name))
+                 (cons "contract" (emit-ir-expr expr))
+                 (cons "contract-type" (ir-type->json type))
+                 (cons "args" (list->vector (map emit-ir-expr expr*))))]
+          [else
+           ;; Defensive: unrecognized Lnovectorref Expression form. With the
+           ;; coverage contracts (election, bboard, micro-dao) this never
+           ;; fires, but the fallback keeps the pass total in case the
+           ;; grammar grows.
+           (list (cons "op" "lit")
+                 (cons "type" (list (cons "type" "Void")))
+                 (cons "value" ""))]))
+
+      ;; Deterministic ordering for hashtable-derived JSON arrays: sort the
+      ;; emitted objects by their "name" field. eq-hashtable iteration order is
+      ;; unspecified, which made contract-info.json non-reproducible across
+      ;; compiles; sorting keeps it stable.
+      (define (json-name obj)
+        (let ([n (cond [(assoc "name" obj) => cdr] [else ""])])
+          (if (symbol? n) (symbol->string n) n)))
+      (define (sort-json-by-name objs)
+        (sort (lambda (a b) (string<? (json-name a) (json-name b))) objs))
+
+      ;; Emit a circuit body expression as a statement tree.
+      (define (emit-ir-body the-expr)
+        (nanopass-case (Lnovectorref Expression) the-expr
+          [(seq ,src ,expr* ... ,expr)
+           (let ([stmts (map (lambda (e)
+                               (list (cons "op" "expr-stmt")
+                                     (cons "expr" (emit-ir-expr e))))
+                             (append expr* (list expr)))])
+             (list (cons "op" "seq")
+                   (cons "stmts" (list->vector stmts))))]
+          [else
+           (list (cons "op" "seq")
+                 (cons "stmts" (list->vector
+                                 (list (list (cons "op" "expr-stmt")
+                                             (cons "expr" (emit-ir-expr the-expr)))))))])))
 
     (Program : Program (ir) -> Program ()
       [(program ,src (,contract-name* ...) ((,export-name* ,name*) ...) ,pelt* ...)
+       ;; Populate signature-table (native/witness dispatch + result type) and
+       ;; lowered-body-table (per-circuit body for the `ir` field) from the
+       ;; lowered (Lnovectorref) program. Working off the lowered form means
+       ;; enums, loops and helper calls are already resolved, and the body and
+       ;; its types live in a single language.
+       (nanopass-case (Lnovectorref Program) novectorref-ir
+         [(program ,src ((,export-name* ,name*) ...) ,pelt* ...)
+          (for-each
+            (lambda (pelt)
+              (nanopass-case (Lnovectorref Program-Element) pelt
+                [(circuit ,src ,function-name (,arg* ...) ,type ,expr)
+                 (hashtable-set! lowered-body-table (id-sym function-name) expr)]
+                [(native ,src ,function-name ,native-entry (,arg* ...) ,type)
+                 (let ([cls (native-entry-class native-entry)])
+                   (hashtable-set! signature-table
+                                   (id-sym function-name)
+                                   (list (if (eq? cls 'witness) 'native-witness 'native-circuit)
+                                         type)))]
+                [(witness ,src ,function-name (,arg* ...) ,type)
+                 (hashtable-set! signature-table
+                                 (id-sym function-name)
+                                 (list 'witness-decl type))]
+                [else (void)]))
+            pelt*)])
        (let ([op (get-target-port 'contract-info.json)])
          (print-json op
            (list
@@ -115,7 +636,24 @@
                (list->vector (map symbol->string contract-name*)))
              (cons
                "ledger"
-               (list->vector (fold-right LedgerField '() pelt*))))))
+               (list->vector (fold-right LedgerField '() pelt*)))
+             (cons
+               "structs"
+               (list->vector
+                 (let ([acc '()])
+                   (let-values ([(keys vals) (hashtable-entries struct-table)])
+                     (vector-for-each
+                       (lambda (k v)
+                         ;; `v` is `(unique-name fields-vector-or-#f)`. Skip
+                         ;; entries whose fields slot is still the placeholder.
+                         (when (and (pair? v) (vector? (cadr v)))
+                           (set! acc
+                                 (cons (list (cons "name" (car v))
+                                             (cons "fields" (cadr v)))
+                                       acc))))
+                       keys vals))
+                   (sort-json-by-name acc))))
+            )))
        ir])
     (Witness : Program-Element (ir witness*) -> * (json)
       [(witness ,src ,function-name (,arg* ...) ,type)
@@ -185,7 +723,21 @@
                  (list->vector (map Argument arg*)))
                (cons
                  "result-type"
-                 (Type type)))
+                 (Type type))
+               (cons
+                 "ir"
+                 (if (and (not (id-pure? function-name))
+                          (memq (id-sym function-name) proof-circuit-name*))
+                     ;; The body is taken from the lowered (Lnovectorref)
+                     ;; program, looked up by circuit name.
+                     (let ([lowered-body (hashtable-ref lowered-body-table
+                                                        (id-sym function-name) #f)])
+                       (if lowered-body
+                           (list
+                             (cons "body" (emit-ir-body lowered-body))
+                             (cons "result" (void)))
+                           (void)))
+                     (void))))
              circuit*))
          circuit*
          (external-names function-name))]
