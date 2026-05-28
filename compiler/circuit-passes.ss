@@ -16,7 +16,7 @@
 ;;; limitations under the License.
 
 (library (circuit-passes)
-  (export circuit-passes)
+  (export circuit-passes circuit-passes-lower circuit-passes-flatten)
   (import (except (chezscheme) errorf)
           (utils)
           (datatype)
@@ -3793,7 +3793,10 @@
 
   (define optimize-circuit2 (lambda (x) (optimize-circuit x)))
 
-  (define-passes circuit-passes
+  ;; Lowering up to Lnovectorref: enums resolved, loops unrolled, circuits
+  ;; inlined, safe-casts dropped. Exposed so save-contract-info can serialize
+  ;; the lowered (but still expression-structured) circuit body as IR.
+  (define-passes circuit-passes-lower
     (drop-ledger-runtime             Lposttypescript)
     (replace-enums                   Lnoenums)
     (unroll-loops                    Lunrolled)
@@ -3801,13 +3804,19 @@
     (drop-safe-casts                 Lnosafecast)
     (resolve-indices/simplify        Lnovectorref)
     (discard-useless-code            Lnovectorref)
-    (prune-unnecessary-circuits      Lnovectorref)
+    (prune-unnecessary-circuits      Lnovectorref))
+
+  ;; Flattening from Lnovectorref down to Lflattened (fed to zkir).
+  (define-passes circuit-passes-flatten
     (reduce-to-circuit               Lcircuit)
     (flatten-datatypes               Lflattened)
     (optimize-circuit                Lflattened)
     (missing-guard-workarounds       Lflattened)
     ; rereun optimize-circuit to optimize code added by missing-guard-workarounds
     (optimize-circuit2               Lflattened))
+
+  ;; Full Lnodisclose -> Lflattened pipeline (composition of the two halves).
+  (define circuit-passes (append circuit-passes-lower circuit-passes-flatten))
 
   (define-checker check-types/Linlined Linlined)
   (define-checker check-types/Lflattened Lflattened)

@@ -138,14 +138,15 @@
                         (let* ([lsrc-ir (run-passes parser-passes pathname)]
                                [frontend-ir (run-passes frontend-passes lsrc-ir)]
                                [analyzed-ir (run-passes analysis-passes frontend-ir)]
-                               [circuit-ir (run-passes circuit-passes analyzed-ir)]
+                               [novectorref-ir (run-passes circuit-passes-lower analyzed-ir)]
+                               [circuit-ir (run-passes circuit-passes-flatten novectorref-ir)]
                                [proof-circuit-name* (extract-circuit-names circuit-ir)])
                           (rm-rf (format "~a/compiler" output-directory-pathname))
                           (rm-rf (format "~a/zkir" output-directory-pathname))
                           (rm-rf (format "~a/keys" output-directory-pathname))
                           (with-target-ports
                             '((contract-info.json . "compiler/contract-info.json"))
-                            (run-passes save-contract-info-passes analyzed-ir proof-circuit-name*))
+                            (run-passes save-contract-info-passes analyzed-ir novectorref-ir proof-circuit-name*))
                           (with-target-ports
                             (map (lambda (sym) (cons sym (format "zkir/~a.zkir" sym)))
                                  proof-circuit-name*)

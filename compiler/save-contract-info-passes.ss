@@ -29,7 +29,7 @@
           (pass-helpers))
 
   ; NB: must come after identify-pure-circuits
-  (define-pass save-contract-info : Lnodisclose (ir proof-circuit-name*) -> Lnodisclose ()
+  (define-pass save-contract-info : Lnodisclose (ir novectorref-ir proof-circuit-name*) -> Lnodisclose ()
     (definitions
       ;; Flatten a Public-Ledger-Array B-tree into a list of Public-Ledger-Binding nodes.
       (define (flatten-pl-array pl-array)
