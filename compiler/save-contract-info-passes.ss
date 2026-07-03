@@ -253,7 +253,14 @@
                    (list (cons "op" "ins")
                          (cons "cached" (if (get-arg "cached") #t #f))
                          (cons "n" n-val))))]
-            [(string=? op "dup")     (list (cons "op" "dup"))]
+            [(string=? op "dup")
+             ;; Emit the stack arity `n`. `dup{n}` duplicates the stack element
+             ;; `n` below the top; without it the IR consumer can only assume
+             ;; `n=0` (dup the top), which mis-navigates the VM stack for
+             ;; context reads (`kernel.self()` is `dup{n:2}`) and the
+             ;; mint/spend kernel effects (`dup{n:1}`/`dup{n:2}`).
+             (list (cons "op" "dup")
+                   (cons "n" (if (has-arg? "n") (vmop->json (get-arg "n")) 0)))]
             [(string=? op "popeq")
              (list (cons "op" "popeq")
                    (cons "cached" (if (has-arg? "cached")
