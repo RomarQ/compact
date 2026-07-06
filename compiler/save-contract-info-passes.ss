@@ -187,9 +187,38 @@
              (list (cons "type" "Struct") (cons "name" unique-name)))]
           [else (list (cons "type" "Void"))]))
 
+      ;; An integer literal ADT-op argument carrying its declared type.
+      ;;
+      ;; By this pass enums are already erased to integers, so a bare
+      ;; `(quote <n>)` argument would be emitted as a generic `Field` literal
+      ;; (`emit-ir-expr`), while the TS codegen at the same site encodes it
+      ;; through the ledger operation's declared argument type (e.g. an enum
+      ;; cell write is a 1-byte value, not a field element). The
+      ;; `public-ledger` emitter wraps such literals with the declared type
+      ;; so the IR carries the on-chain encoding width.
+      (define-record-type typed-lit
+        (nongenerative)
+        (fields value type-json))
+
+      ;; Wrap an ADT-op argument expression with its declared type when it is
+      ;; a bare integer literal; anything else passes through unchanged (the
+      ;; IR consumer resolves non-literal expressions against its own type
+      ;; environment).
+      (define (typed-op-arg type expr)
+        (nanopass-case (Lnovectorref Expression) expr
+          [(quote ,src ,datum)
+           (if (and (integer? datum) (exact? datum))
+               (make-typed-lit datum (ir-type->json type))
+               expr)]
+          [else expr]))
+
       ;; Convert a VMop value to JSON-safe form.
       (define (vmop->json v)
         (cond
+          [(typed-lit? v)
+           (list (cons "op" "lit")
+                 (cons "type" (typed-lit-type-json v))
+                 (cons "value" (number->string (typed-lit-value v))))]
           [(integer? v) v]
           [(boolean? v) v]
           [(string? v) v]
@@ -436,7 +465,8 @@
                                      path-elt*)]
                      [arg-alist (append
                                   (map (lambda (f a) (cons f a)) adt-formal* adt-arg*)
-                                  (map (lambda (vn ex) (cons (id-sym vn) ex)) var-name* expr*))]
+                                  (map (lambda (vn ty ex) (cons (id-sym vn) (typed-op-arg ty ex)))
+                                       var-name* type* expr*))]
                      [result-type (ir-type->json type)]
                      [vminstr* (expand-vm-code src path-vals #f arg-alist (vm-code-code vm-code))]
                      [json-ops (fold-right
