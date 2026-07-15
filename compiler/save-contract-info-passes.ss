@@ -703,7 +703,7 @@
              "arguments"
              (list->vector (map Argument arg*)))
            (cons
-             "result type"
+             "result-type"
              (Type type)))
          witness*)]
       [else witness*])
