@@ -29,6 +29,22 @@
           (pass-helpers)
           (vm))
 
+  ;; Render an identifier for the portable IR.
+  ;;
+  ;; Inlining renames locals with `make-temp-id`, which keeps the original
+  ;; symbol, so a circuit that inlines several helpers ends up with many
+  ;; distinct bindings all named `tmp`. The internal form distinguishes them
+  ;; by id identity, but emitting the bare symbol collapses them: a consumer
+  ;; sees `[let tmp = a, let tmp = b]` with two `var tmp` references and
+  ;; cannot tell which binding each reference means. Qualifying temps with
+  ;; their unique id keeps binding and reference sites in agreement.
+  ;; Source-level names are already distinct within their scope and are
+  ;; emitted as written, so circuit arguments stay addressable by name.
+  (define (ir-var-name var-name)
+    (if (id-temp? var-name)
+        (format "~a.~a" (id-sym var-name) (id-uniq var-name))
+        (symbol->string (id-sym var-name))))
+
   ; NB: must come after identify-pure-circuits
   (define-pass save-contract-info : Lnodisclose (ir novectorref-ir proof-circuit-name*) -> Lnodisclose ()
     (definitions
@@ -324,7 +340,7 @@
         (nanopass-case (Lnovectorref Expression) expr
           [(var-ref ,src ,var-name)
            (list (cons "op" "var")
-                 (cons "name" (symbol->string (id-sym var-name))))]
+                 (cons "name" (ir-var-name var-name)))]
           [(quote ,src ,datum)
            ;; Emit a typed literal so the IR consumer can decode it.
            ;; `(quote)` datums in Lnodisclose are produced by `lparser-to-lsrc`
@@ -444,7 +460,7 @@
            (let ([let-stmts (map (lambda (loc bind-expr)
                                    (let ([name (nanopass-case (Lnovectorref Argument) loc
                                                  [(,var-name ,type)
-                                                  (symbol->string (id-sym var-name))])])
+                                                  (ir-var-name var-name)])])
                                      (list (cons "op" "let")
                                            (cons "name" name)
                                            (cons "value" (emit-ir-expr bind-expr)))))
@@ -784,7 +800,7 @@
        (list
          (cons
            "name"
-           (symbol->string (id-sym var-name)))
+           (ir-var-name var-name))
          (cons
            "type"
            (Type type)))])
