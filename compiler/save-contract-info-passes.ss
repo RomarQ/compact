@@ -135,9 +135,7 @@
       (define (vmop->json v)
         (cond
           [(typed-lit? v)
-           (list (cons "op" "lit")
-                 (cons "type" (typed-lit-type-json v))
-                 (cons "value" (number->string (typed-lit-value v))))]
+           (nd-lit (typed-lit-type-json v) (number->string (typed-lit-value v)))]
           [(integer? v) v]
           [(boolean? v) v]
           [(string? v) v]
@@ -196,31 +194,26 @@
                     (cons "recipient" (vmop->json recipient)))]
              [else
               (internal-errorf #f "no JSON encoding for VM value: ~s" v)])]
-          [else
-           (guard (c [#t (format "~s" v)])
-             (nd-emit-ir-expr v))]))
+          [else (nd-emit-ir-expr v)]))
 
       (define (state-entry->json k v)
         (list (cons "key" (vmop->json k)) (cons "value" (vmop->json v))))
 
-      ;; Render one `idx` path element. An element is a constant (a VMalign,
-      ;; already tagged), the VM stack, or a runtime expression: a nested ADT
-      ;; access such as `m.lookup(k).insert(...)` indexes by the value of `k`.
-      ;; Each kind carries its own tag, because an untagged expression would
-      ;; otherwise reach the value branch and be coerced to its printed
-      ;; representation, which the consumer cannot evaluate.
-      ;; A dynamic path element arrives already serialized, because the caller
-      ;; emits the index expression before handing it to the VM expander. It
+      ;; A dynamic path element can arrive already serialized: the sugar-path
+      ;; route emits the index expression before the VM expander runs. It
       ;; must not go through `vmop->json`, which would read the JSON alist as
       ;; a plain list and rewrite it as an array of printed pairs.
       (define (emitted-json? p)
         (and (pair? p) (pair? (car p)) (string? (caar p))))
 
+      ;; Render one `idx` path element: a constant (a VMalign, already
+      ;; tagged), the VM stack, or a runtime expression (a nested ADT access
+      ;; such as `m.lookup(k).insert(...)` indexes by the value of `k`, and
+      ;; arrives as a raw node the ledger-op-argument route serializes here).
+      ;; Each kind carries its own tag, because an untagged expression would
+      ;; otherwise reach the value branch and be coerced to its printed
+      ;; representation, which the consumer cannot evaluate.
       (define (path-elt->json p)
-        ;; An element reaches this either already serialized (a sugar path
-        ;; element, emitted before the VM expander ran) or as a raw node that
-        ;; `vmop->json` serializes here. A ledger-op argument takes the second
-        ;; route, which is how `m.lookup(k)` indexes by the value of `k`.
         (let ([v (if (emitted-json? p) p (vmop->json p))])
           (cond
             [(and (list? v) (assoc "tag" v)) v]
@@ -279,9 +272,7 @@
                    (cons "n" (if (has-arg? "n") (vmop->json (get-arg "n")) 0)))]
             [(string=? op "popeq")
              (list (cons "op" "popeq")
-                   (cons "cached" (if (has-arg? "cached")
-                                      (if (get-arg "cached") #t #f)
-                                      #f)))]
+                   (cons "cached" (if (and (has-arg? "cached") (get-arg "cached")) #t #f)))]
             [(string=? op "member")  (list (cons "op" "member"))]
             [(string=? op "root")    (list (cons "op" "root"))]
             [(string=? op "eq")      (list (cons "op" "eq"))]
@@ -304,15 +295,13 @@
                    (map (lambda (a) (cons (car a) (vmop->json (cdr a)))) args))])))
 
 
-      ;; Deterministic ordering for hashtable-derived JSON arrays: sort the
-      ;; emitted objects by their "name" field. eq-hashtable iteration order is
-      ;; unspecified, which made contract-info.json non-reproducible across
-      ;; compiles; sorting keeps it stable.
-      (define (json-name obj)
-        (let ([n (cond [(assoc "name" obj) => cdr] [else ""])])
-          (if (symbol? n) (symbol->string n) n)))
+      ;; Deterministic ordering for hashtable-derived JSON arrays:
+      ;; eq-hashtable iteration order is unspecified, which made
+      ;; contract-info.json non-reproducible across compiles.
       (define (sort-json-by-name objs)
-        (sort (lambda (a b) (string<? (json-name a) (json-name b))) objs))
+        (sort (lambda (a b)
+                (string<? (cdr (assoc "name" a)) (cdr (assoc "name" b))))
+              objs))
 
       ;; ---------------------------------------------------------------
       ;; Body emitter. Bodies serialize from the analyzed program itself:
@@ -401,6 +390,11 @@
                  (cons "length" nat)
                  (cons "expr" (nd-emit-ir-expr expr)))]))
 
+      ;; `tuple` and `vector` are distinct analyzed forms with one encoding.
+      (define (nd-tuple-json tuple-arg*)
+        (list (cons "op" "tuple")
+              (cons "elements" (list->vector (map nd-tuple-arg tuple-arg*)))))
+
       (define (nd-map-arg ma)
         (nanopass-case (Lnodisclose Map-Argument) ma
           [(,expr ,type ,type^) (nd-emit-ir-expr expr)]))
@@ -416,14 +410,7 @@
                  (list (cons "call" (nd-circuit-name function-name))))
                (list (cons "call" (symbol->string (id-sym function-name)))))]
           [(circuit ,src (,arg* ...) ,type ,expr)
-           (list (cons "params"
-                       (list->vector
-                         (map (lambda (a)
-                                (nanopass-case (Lnodisclose Argument) a
-                                  [(,var-name ,type)
-                                   (list (cons "name" (ir-var-name var-name))
-                                         (cons "type" (Type type)))]))
-                              arg*)))
+           (list (cons "params" (list->vector (map Argument arg*)))
                  (cons "body" (nd-emit-ir-expr expr)))]))
 
       (define (nd-emit-ir-expr expr)
@@ -483,24 +470,24 @@
                     (list (cons "type-name" "Uint") (cons "maxval" nat))
                     expr)]
           [(call ,src ,function-name ,expr* ...)
-           (let* ([fn-sym (id-sym function-name)]
-                  [name (symbol->string fn-sym)]
-                  [json-args (list->vector (map nd-emit-ir-expr expr*))])
+           (let ([fn-sym (id-sym function-name)]
+                 [json-args (list->vector (map nd-emit-ir-expr expr*))])
              (cond
-               [(hashtable-contains? nd-circuit-table function-name)
-                (hashtable-set! nd-called function-name #t)
-                (let ([result-type (cadr (hashtable-ref nd-circuit-table function-name #f))])
-                  (list (cons "op" "call-pure")
-                        (cons "name" (nd-circuit-name function-name))
-                        (cons "args" json-args)
-                        (cons "result-type" (Type result-type))))]
-               [(hashtable-contains? nd-signature-table fn-sym)
-                (let* ([sig (hashtable-ref nd-signature-table fn-sym #f)]
-                       [op (if (eq? (car sig) 'native-circuit) "call-pure" "call-witness")])
-                  (list (cons "op" op)
-                        (cons "name" name)
-                        (cons "args" json-args)
-                        (cons "result-type" (Type (cadr sig)))))]
+               [(hashtable-ref nd-circuit-table function-name #f)
+                => (lambda (entry)
+                     (hashtable-set! nd-called function-name #t)
+                     (list (cons "op" "call-pure")
+                           (cons "name" (nd-circuit-name function-name))
+                           (cons "args" json-args)
+                           (cons "result-type" (Type (cadr entry)))))]
+               [(hashtable-ref nd-signature-table fn-sym #f)
+                => (lambda (sig)
+                     (list (cons "op" (if (eq? (car sig) 'native-circuit)
+                                          "call-pure"
+                                          "call-witness"))
+                           (cons "name" (symbol->string fn-sym))
+                           (cons "args" json-args)
+                           (cons "result-type" (Type (cadr sig)))))]
                [else (error 'nd-emit-ir-expr "unknown callee" fn-sym)]))]
           [(map ,src ,len ,fun ,map-arg ,map-arg* ...)
            (list (cons "op" "map")
@@ -568,12 +555,8 @@
                                            (cons "value" (nd-emit-ir-expr (car rest)))))))
                        (cons "body" (loop (cdr rest) (+ n 1))))))]
           [(return ,src ,expr) (nd-emit-ir-expr expr)]
-          [(tuple ,src ,tuple-arg* ...)
-           (list (cons "op" "tuple")
-                 (cons "elements" (list->vector (map nd-tuple-arg tuple-arg*))))]
-          [(vector ,src ,tuple-arg* ...)
-           (list (cons "op" "tuple")
-                 (cons "elements" (list->vector (map nd-tuple-arg tuple-arg*))))]
+          [(tuple ,src ,tuple-arg* ...) (nd-tuple-json tuple-arg*)]
+          [(vector ,src ,tuple-arg* ...) (nd-tuple-json tuple-arg*)]
           [(field->bytes ,src ,len ,expr)
            (list (cons "op" "field-to-bytes")
                  (cons "length" len)
@@ -627,37 +610,24 @@
                             (unparse-Lnodisclose expr))]))
 
       (define (nd-emit-ir-body the-expr)
-        (nanopass-case (Lnodisclose Expression) the-expr
-          [(seq ,src ,expr* ... ,expr)
-           (list (cons "op" "seq")
-                 (cons "stmts"
-                       (list->vector
-                         (map (lambda (e)
-                                (list (cons "op" "expr-stmt")
-                                      (cons "expr" (nd-emit-ir-expr e))))
-                              (append expr* (list expr))))))]
-          [else
-           (list (cons "op" "seq")
-                 (cons "stmts" (list->vector
-                                 (list (list (cons "op" "expr-stmt")
-                                             (cons "expr" (nd-emit-ir-expr the-expr)))))))]))
+        (define (expr-stmt e)
+          (list (cons "op" "expr-stmt") (cons "expr" (nd-emit-ir-expr e))))
+        (list (cons "op" "seq")
+              (cons "stmts"
+                    (list->vector
+                      (map expr-stmt
+                           (nanopass-case (Lnodisclose Expression) the-expr
+                             [(seq ,src ,expr* ... ,expr) (append expr* (list expr))]
+                             [else (list the-expr)]))))))
 
       ;; One entry per called circuit: the consumer's call table. `body`
-      ;; stays an empty statement list and `result` carries the circuit's
-      ;; body expression (a Compact circuit returns its final expression).
+      ;; matches a circuit's `ir` body: the return value is the body's
+      ;; final expression statement.
       (define (nd-emit-helper-def fn-id entry)
         (list
           (cons "name" (nd-circuit-name fn-id))
-          (cons "params"
-                (list->vector
-                  (map (lambda (a)
-                         (nanopass-case (Lnodisclose Argument) a
-                           [(,var-name ,type)
-                            (list (cons "name" (ir-var-name var-name))
-                                  (cons "type" (Type type)))]))
-                       (car entry))))
-          (cons "body" (list (cons "op" "seq") (cons "stmts" (list->vector '()))))
-          (cons "result" (nd-emit-ir-expr (caddr entry)))))
+          (cons "params" (list->vector (map Argument (car entry))))
+          (cons "body" (nd-emit-ir-body (caddr entry)))))
 
       ;; Emitting a helper body can reference more circuits, so drain to
       ;; a fixpoint before assembling the array.
@@ -704,46 +674,29 @@
              [else (void)]))
          pelt*)
        (let* ([op (get-target-port 'contract-info.json)]
-              ;; The circuits entry must be built before the helpers entry:
-              ;; emitting circuit bodies populates the called-circuits set
-              ;; the helpers array drains.
-              [head
-               (list
-                 (cons
-                   "contract-info-version"
-                   contract-info-version-string)
-                 (cons
-                     "compiler-version"
-                     compiler-version-string)
-                   (cons
-                     "language-version"
-                     language-version-string)
-                   (cons
-                     "runtime-version"
-                     runtime-version-string)
-                   (cons
-                     "circuits"
-                     (list->vector
-                       (let ([export-alist (map cons export-name* name*)])
-                         (fold-right
-                           (lambda (pelt circuit*) (exported-circuit pelt circuit* export-alist))
-                           '()
-                           pelt*))))
-                   (cons
-                     "witnesses"
-                     (list->vector (fold-right Witness '() pelt*)))
-                   (cons
-                     "contracts"
-                     (list->vector (map symbol->string contract-name*)))
-                 (cons
-                   "ledger"
-                   (list->vector (fold-right LedgerField '() pelt*)))
-                 (cons
-                   "constructor"
-                   (fold-right LedgerConstructor (void) pelt*)))]
-              [tail
-               (list (cons "helpers" (list->vector (nd-emit-helpers))))])
-         (print-json op (append head tail)))
+              [export-alist (map cons export-name* name*)]
+              [circuit-json
+               (list->vector
+                 (fold-right
+                   (lambda (pelt circuit*) (exported-circuit pelt circuit* export-alist))
+                   '()
+                   pelt*))]
+              [constructor-json (fold-right LedgerConstructor (void) pelt*)]
+              ;; Bound after the circuit and constructor bodies, which
+              ;; populate the called-circuits set this drains.
+              [helper-json (list->vector (nd-emit-helpers))])
+         (print-json op
+           (list
+             (cons "contract-info-version" contract-info-version-string)
+             (cons "compiler-version" compiler-version-string)
+             (cons "language-version" language-version-string)
+             (cons "runtime-version" runtime-version-string)
+             (cons "circuits" circuit-json)
+             (cons "witnesses" (list->vector (fold-right Witness '() pelt*)))
+             (cons "contracts" (list->vector (map symbol->string contract-name*)))
+             (cons "ledger" (list->vector (fold-right LedgerField '() pelt*)))
+             (cons "constructor" constructor-json)
+             (cons "helpers" helper-json))))
        ir])
     (Witness : Program-Element (ir witness*) -> * (json)
       [(witness ,src ,function-name (,arg* ...) ,type)
@@ -844,8 +797,7 @@
                (cons
                  "ir"
                  (list
-                   (cons "body" (nd-emit-ir-body expr))
-                   (cons "result" (void)))))
+                   (cons "body" (nd-emit-ir-body expr)))))
              circuit*))
          circuit*
          (external-names function-name))]
@@ -869,7 +821,7 @@
       [(tunsigned ,src ,nat)
        (list
          (cons "type-name" "Uint")
-         ;; A maxval reaches 2^254-1. It stays a JSON number, which is what
+         ;; A maxval reaches 2^248-1. It stays a JSON number, which is what
          ;; the compiler's own reader for an imported contract requires; a
          ;; consumer must parse it with arbitrary precision.
          (cons "maxval" nat))]
