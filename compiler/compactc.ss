@@ -92,9 +92,6 @@ The following flags, if present, affect the compiler's behavior as follows:
     languages in ways the printed representation does not support.  The hook
     runs in process and sees internal, unversioned compiler structures: a
     hook written for one compiler version can need changes for the next.
-    Importing the compiler's libraries requires a compactc build that keeps
-    them visible (the compactc-hooks package); in the default build the
-    hook's imports fail with a library-not-found error.
 "))
 
 (usage "<flag> ... <source-pathname> <target-directory-pathname>")
