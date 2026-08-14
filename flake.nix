@@ -210,6 +210,18 @@
             checkPhase = "";
           });
 
+          # compactc with its libraries kept visible for import by --run-hook
+          # files. Visibility defeats whole-program pruning, so this binary is
+          # substantially larger than the default one; that is why it is a
+          # separate package.
+          packages.compactc-hooks = packages.compactc.overrideAttrs (oldAttrs: {
+            name = "compactc-hooks";
+            buildPhase = builtins.replaceStrings
+              [ ''(compile-whole-program "obj/compiler/compactc.wpo" "obj/compactc")'' ]
+              [ ''(compile-whole-program "obj/compiler/compactc.wpo" "obj/compactc" #t)'' ]
+              oldAttrs.buildPhase;
+          });
+
           packages.compactc = pkgs.stdenv.mkDerivation {
             name = "compactc";
             version = "0.33.122"; # NB: also update compiler-version in compiler/compiler-version.ss

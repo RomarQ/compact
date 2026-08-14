@@ -82,6 +82,19 @@ The following flags, if present, affect the compiler's behavior as follows:
 
   --trace-passes causes the compiler to print tracing information that is
     generally useful only to compiler developers.
+
+  --run-hook <pathname> loads the Scheme file at <pathname> and calls the
+    procedure it defines under the name `hook` after every compiler pass, with
+    the pass's name (a symbol), its unparser, its pretty formats, and the
+    pass's output values.  The file is loaded into the interaction
+    environment, where the compiler's own libraries, for example (langs) and
+    (vm), can be imported, so a hook can process the compiler's intermediate
+    languages in ways the printed representation does not support.  The hook
+    runs in process and sees internal, unversioned compiler structures: a
+    hook written for one compiler version can need changes for the next.
+    Importing the compiler's libraries requires a compactc build that keeps
+    them visible (the compactc-hooks package); in the default build the
+    hook's imports fail with a library-not-found error.
 "))
 
 (usage "<flag> ... <source-pathname> <target-directory-pathname>")
@@ -100,6 +113,7 @@ The following flags, if present, affect the compiler's behavior as follows:
              [(--compact-path) (string search-list)]
              [(--trace-search)]
              [(--trace-passes)]
+             [(--run-hook) (string hook-pathname)]
              [(--feature-zkir-v3)])
       (string source-pathname)
       (string target-directory-pathname))
@@ -113,7 +127,15 @@ The following flags, if present, affect the compiler's behavior as follows:
                     [trace-search ?--trace-search])
        (when source-root (register-source-root! source-root))
        (handle-exceptions ?--vscode
-         (generate-everything source-pathname target-directory-pathname)))]
+         (generate-everything source-pathname target-directory-pathname
+           #f
+           (and ?--run-hook
+                (begin
+                  (load hook-pathname)
+                  (let ([h (eval 'hook (interaction-environment))])
+                    (unless (procedure? h)
+                      (external-errorf "the file loaded by --run-hook must define a procedure named hook"))
+                    h))))))]
     [((flags [(--help) $ (begin (print-help) (exit))]
              [(--version) $ (begin (print-compiler-version) (exit))]
              [(--language-version) $ (begin (print-language-version) (exit))]
