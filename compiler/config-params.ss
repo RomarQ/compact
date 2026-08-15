@@ -41,4 +41,6 @@
 
   ; feature flags
   (export-parameter feature-zkir-v3 #f)
+
+  (export-parameter normalized-ir #f)
 )
