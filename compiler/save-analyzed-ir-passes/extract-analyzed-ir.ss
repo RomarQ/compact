@@ -15,15 +15,15 @@
 
 #!chezscheme
 
-;; The normalized IR: the analyzed program (Lloweredemit) printed in the
+;; The analyzed IR: the analyzed program (Lloweredemit) printed in the
 ;; language's own vocabulary, with each ledger operation and emit expanded to
 ;; its Impact VM instructions, and with the export table and the
 ;; exported/pure/proof flags made explicit. langs.ss is the grammar; the VM
 ;; instruction notation is the ledger DSL of midnight-ledger.ss.
 
-(define-pass extract-normalized-ir : Lloweredemit (ir proof-circuit-name*) -> * (sexp)
+(define-pass extract-analyzed-ir : Lloweredemit (ir proof-circuit-name*) -> * (sexp)
   (definitions
-    (define (fail what x) (internal-errorf 'save-normalized-ir "unsupported ~a: ~s" what x))
+    (define (fail what x) (internal-errorf 'save-analyzed-ir "unsupported ~a: ~s" what x))
 
     ;; An id prints as the compiler prints it; make it a symbol so it reads back.
     (define (id->sym i) (string->symbol (format "~a" i)))
@@ -302,7 +302,7 @@
 
   (Program : Program (ir) -> * (sexp)
     [(program ,src (,contract-type* ...) ((,export-name* ,name*) ...) ,pelt* ...)
-     `(normalized-ir
+     `(analyzed-ir
         (compiler-version ,compiler-version-string)
         (language-version ,language-version-string)
         (runtime-version ,runtime-version-string)

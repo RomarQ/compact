@@ -15,8 +15,8 @@
 
 #!chezscheme
 
-(library (save-normalized-ir-passes)
-  (export save-normalized-ir-passes)
+(library (save-analyzed-ir-passes)
+  (export save-analyzed-ir-passes)
   (import (except (chezscheme) errorf)
           (utils)
           (nanopass)
@@ -27,10 +27,10 @@
           (runtime-version)
           (pass-helpers))
 
-  (include "save-normalized-ir-passes/extract-normalized-ir.ss")
+  (include "save-analyzed-ir-passes/extract-analyzed-ir.ss")
 
-  (include "save-normalized-ir-passes/save-normalized-ir.ss")
+  (include "save-analyzed-ir-passes/save-analyzed-ir.ss")
 
-  (define-passes save-normalized-ir-passes
-    (save-normalized-ir              Lloweredemit))
+  (define-passes save-analyzed-ir-passes
+    (save-analyzed-ir              Lloweredemit))
 )
