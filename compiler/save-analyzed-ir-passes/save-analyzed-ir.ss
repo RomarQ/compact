@@ -16,9 +16,16 @@
 #!chezscheme
 
 (define (save-analyzed-ir ir proof-circuit-name*)
-  (let ([op (get-target-port 'analyzed-ir.sexp)])
-    ;; Parentheses only: brackets are a Chez pretty-printing style, and a
-    ;; non-Scheme reader should not need to treat them as paren synonyms.
-    (parameterize ([print-brackets #f])
-      (pretty-print (extract-analyzed-ir ir proof-circuit-name*) op)))
+  (let ([sexp (extract-analyzed-ir ir proof-circuit-name*)])
+    (cond
+      ;; The hook takes the datum and the directory as arguments, so it needs
+      ;; no import from the compiler and runs in a binary built without
+      ;; visible libraries.
+      [(analyzed-ir-hook) => (lambda (hook) (hook sexp (target-directory)))]
+      [else
+       (let ([op (get-target-port 'analyzed-ir.sexp)])
+         ;; Parentheses only: brackets are a Chez pretty-printing style, and a
+         ;; non-Scheme reader should not need to treat them as paren synonyms.
+         (parameterize ([print-brackets #f])
+           (pretty-print sexp op)))]))
   ir)

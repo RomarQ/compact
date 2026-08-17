@@ -146,10 +146,14 @@
                         (with-target-ports
                           '((contract-info.json . "compiler/contract-info.json"))
                           (run-passes save-contract-info-passes analyzed-ir proof-circuit-name*))
-                        (when (write-analyzed-ir)
-                          (with-target-ports
-                            '((analyzed-ir.sexp . "compiler/analyzed-ir.sexp"))
-                            (run-passes save-analyzed-ir-passes analyzed-ir proof-circuit-name*)))
+                        (cond
+                          [(analyzed-ir-hook)
+                           ;; The hook takes the datum, so open no file for it.
+                           (run-passes save-analyzed-ir-passes analyzed-ir proof-circuit-name*)]
+                          [(write-analyzed-ir)
+                           (with-target-ports
+                             '((analyzed-ir.sexp . "compiler/analyzed-ir.sexp"))
+                             (run-passes save-analyzed-ir-passes analyzed-ir proof-circuit-name*))])
                         (with-target-ports
                           (map (lambda (sym) (cons sym (format "zkir/~a.zkir" sym)))
                                proof-circuit-name*)

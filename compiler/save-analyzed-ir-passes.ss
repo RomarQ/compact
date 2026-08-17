@@ -25,7 +25,8 @@
           (compiler-version)
           (language-version)
           (runtime-version)
-          (pass-helpers))
+          (pass-helpers)
+          (config-params))
 
   (include "save-analyzed-ir-passes/extract-analyzed-ir.ss")
 

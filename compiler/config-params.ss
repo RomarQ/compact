@@ -43,4 +43,7 @@
   (export-parameter feature-zkir-v3 #f)
 
   (export-parameter write-analyzed-ir #f)
+
+  ;; The procedure --analyzed-ir-hook loaded, or #f to write the file.
+  (export-parameter analyzed-ir-hook #f)
 )

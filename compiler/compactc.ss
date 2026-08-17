@@ -91,7 +91,28 @@ The following flags, if present, affect the compiler's behavior as follows:
     execute circuits from this file with an interpreter.  The file is one
     S-expression datum.  The format follows the intermediate language, so it
     can change between compiler versions.
+
+  --analyzed-ir-hook <pathname> loads the Scheme file at <pathname> and calls
+    the procedure it defines under the name `hook` with the same datum
+    --analyzed-ir writes, and with the target directory as a string.  The
+    compiler writes no analyzed-ir.sexp in this mode: the hook decides what
+    to do with the datum, so a consumer can render it in the encoding its
+    own tools want.  The datum is ordinary data, so the file needs no import
+    from the compiler.
 "))
+
+;; The loaded file sees only the bindings the boot file already provides, so a
+;; hook that takes the datum needs no library from the compiler and the binary
+;; keeps its libraries pruned.
+(define (load-hook pathname)
+  (define (complain)
+    (external-errorf "the file loaded by --analyzed-ir-hook must define a procedure named hook"))
+  (check-pathname pathname)
+  (load pathname)
+  (unless (top-level-bound? 'hook (interaction-environment)) (complain))
+  (let ([hook (eval 'hook (interaction-environment))])
+    (unless (procedure? hook) (complain))
+    hook))
 
 (usage "<flag> ... <source-pathname> <target-directory-pathname>")
 
@@ -110,6 +131,7 @@ The following flags, if present, affect the compiler's behavior as follows:
              [(--trace-search)]
              [(--trace-passes)]
              [(--analyzed-ir)]
+             [(--analyzed-ir-hook) (string analyzed-ir-hook-pathname)]
              [(--feature-zkir-v3)])
       (string source-pathname)
       (string target-directory-pathname))
@@ -120,6 +142,9 @@ The following flags, if present, affect the compiler's behavior as follows:
                     [no-communications-commitment ?--no-communications-commitment]
                     [feature-zkir-v3 ?--feature-zkir-v3]
                     [write-analyzed-ir ?--analyzed-ir]
+                    [analyzed-ir-hook
+                      (and ?--analyzed-ir-hook
+                           (load-hook analyzed-ir-hook-pathname))]
                     [compact-path (if ?--compact-path (split-search-path search-list) (compact-path))]
                     [trace-search ?--trace-search])
        (when source-root (register-source-root! source-root))
