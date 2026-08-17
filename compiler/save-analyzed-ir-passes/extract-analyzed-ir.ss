@@ -45,16 +45,20 @@
            [(VMstack) '(stack)]
            [(VMvoid) '(void)]
            [(VMalign value bytes) `(align ,value ,bytes)]
+           [(VM+ x y) `(+ ,(vm-value->sexp x) ,(vm-value->sexp y))]
            [(VMvalue->int x) `(value->int ,(vm-value->sexp x))]
-           [(VMnull x) `(null ,(vm-value->sexp x))]
-           [(VMmax-sizeof x) `(max-sizeof ,(vm-value->sexp x))]
+           ;; rt-null and rt-max-sizeof take a type, not a value.
+           [(VMnull x) `(null ,(Type x))]
+           [(VMmax-sizeof x) `(max-sizeof ,(Type x))]
            [(VMleaf-hash x) `(leaf-hash ,(vm-value->sexp x))]
            [(VMcoin-commit coin recipient)
             `(coin-commit ,(vm-value->sexp coin) ,(vm-value->sexp recipient))]
            [(VMaligned-concat x*) `(aligned-concat ,@(map vm-value->sexp x*))]
            [(VMstate-value-null) '(state-value null)]
            [(VMstate-value-cell val) `(state-value cell ,(vm-value->sexp val))]
-           [(VMstate-value-ADT val type) `(state-value ADT ,(vm-value->sexp val))]
+           ;; The type decides whether the value is already a public ADT or
+           ;; needs a cell around it, so a consumer needs it too.
+           [(VMstate-value-ADT val type) `(state-value ADT ,(vm-value->sexp val) ,(Type type))]
            [(VMstate-value-array val*) `(state-value array ,@(map vm-value->sexp val*))]
            [(VMstate-value-map key* val*)
             `(state-value map ,@(map (lambda (k v) `(,(vm-value->sexp k) ,(vm-value->sexp v))) key* val*))]
@@ -256,12 +260,12 @@
   ;; Program elements.
   ;; --------------------------------------------------------------------
 
-  (Pelt : Program-Element (pelt) -> * (sexp)
+  (Pelt : Program-Element (pelt proof-id*) -> * (sexp)
     [(circuit ,src ,function-name (,arg* ...) ,type ,expr)
      `(circuit ,(id->sym function-name)
         (exported ,(id-exported? function-name))
         (pure ,(id-pure? function-name))
-        (proof ,(and (memq (id-sym function-name) proof-circuit-name*) #t))
+        (proof ,(and (memq function-name proof-id*) #t))
         ,(map Arg arg*)
         ,(Type type)
         ,(Expr expr))]
@@ -302,12 +306,24 @@
 
   (Program : Program (ir) -> * (sexp)
     [(program ,src (,contract-type* ...) ((,export-name* ,name*) ...) ,pelt* ...)
+     ;; proof-circuit-name* holds export names, and a selective export can
+     ;; spell one differently from the circuit's own name, so resolve
+     ;; through the export table rather than comparing the two spellings.
+     ;; Collect the id records themselves: id-uniq is assigned on first
+     ;; print, so printing one here would renumber the whole artifact.
+     (let ([proof-id*
+             (fold-left
+               (lambda (acc export-name name)
+                 (if (memq export-name proof-circuit-name*) (cons name acc) acc))
+               '()
+               export-name*
+               name*)])
      `(analyzed-ir
         (compiler-version ,compiler-version-string)
         (language-version ,language-version-string)
         (runtime-version ,runtime-version-string)
         (exports ,@(map (lambda (en n) `(,en . ,(id->sym n))) export-name* name*))
         (contract-types ,@(map Type contract-type*))
-        ,@(map Pelt pelt*))])
+        ,@(map (lambda (pelt) (Pelt pelt proof-id*)) pelt*)))])
 
   (Program ir))
