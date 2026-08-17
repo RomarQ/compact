@@ -95,8 +95,8 @@ The following flags, if present, affect the compiler's behavior as follows:
   --analyzed-ir-hook <pathname> loads the Scheme file at <pathname> and calls
     the procedure it defines under the name `hook` with the same datum
     --analyzed-ir writes, and with the target directory as a string.  The
-    compiler writes no analyzed-ir.sexp in this mode: the hook decides what
-    to do with the datum, so a consumer can render it in the encoding its
+    compiler writes no analyzed-ir.sexp in this mode.  The hook runs after
+    the compile succeeds, and it decides what to do with the datum, so a consumer can render it in the encoding its
     own tools want.  The datum is ordinary data, so the file needs no import
     from the compiler.
 "))
@@ -108,6 +108,8 @@ The following flags, if present, affect the compiler's behavior as follows:
   (define (complain)
     (external-errorf "the file loaded by --analyzed-ir-hook must define a procedure named hook"))
   (check-pathname pathname)
+  (unless (file-exists? pathname)
+    (external-errorf "the file named by --analyzed-ir-hook does not exist: ~a" pathname))
   (load pathname)
   (unless (top-level-bound? 'hook (interaction-environment)) (complain))
   (let ([hook (eval 'hook (interaction-environment))])
@@ -142,14 +144,16 @@ The following flags, if present, affect the compiler's behavior as follows:
                     [no-communications-commitment ?--no-communications-commitment]
                     [feature-zkir-v3 ?--feature-zkir-v3]
                     [write-analyzed-ir ?--analyzed-ir]
-                    [analyzed-ir-hook
-                      (and ?--analyzed-ir-hook
-                           (load-hook analyzed-ir-hook-pathname))]
                     [compact-path (if ?--compact-path (split-search-path search-list) (compact-path))]
                     [trace-search ?--trace-search])
        (when source-root (register-source-root! source-root))
        (handle-exceptions ?--vscode
-         (generate-everything source-pathname target-directory-pathname)))]
+         ;; Load inside the handler: a missing or malformed hook file is
+         ;; user input, and its error belongs in the same format as the rest.
+         (parameterize ([analyzed-ir-hook
+                          (and ?--analyzed-ir-hook
+                               (load-hook analyzed-ir-hook-pathname))])
+           (generate-everything source-pathname target-directory-pathname))))]
     [((flags [(--help) $ (begin (print-help) (exit))]
              [(--version) $ (begin (print-compiler-version) (exit))]
              [(--language-version) $ (begin (print-language-version) (exit))]

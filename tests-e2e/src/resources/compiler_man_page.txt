@@ -69,7 +69,7 @@ The following flags, if present, affect the compiler's behavior as follows:
   --analyzed-ir-hook <pathname> loads the Scheme file at <pathname> and calls
     the procedure it defines under the name `hook` with the same datum
     --analyzed-ir writes, and with the target directory as a string.  The
-    compiler writes no analyzed-ir.sexp in this mode: the hook decides what
-    to do with the datum, so a consumer can render it in the encoding its
+    compiler writes no analyzed-ir.sexp in this mode.  The hook runs after
+    the compile succeeds, and it decides what to do with the datum, so a consumer can render it in the encoding its
     own tools want.  The datum is ordinary data, so the file needs no import
     from the compiler.
