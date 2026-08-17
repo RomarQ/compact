@@ -56,3 +56,20 @@ The following flags, if present, affect the compiler's behavior as follows:
 
   --trace-passes causes the compiler to print tracing information that is
     generally useful only to compiler developers.
+
+  --analyzed-ir causes the compiler to also write compiler/analyzed-ir.sexp
+    into the target directory: the analyzed program printed in the compiler's
+    own intermediate-language vocabulary, with each ledger operation and emit
+    expanded to its Impact VM instructions, and with the export table and the
+    exported/pure/proof flags made explicit.  An SDK in any language can
+    execute circuits from this file with an interpreter.  The file is one
+    S-expression datum.  The format follows the intermediate language, so it
+    can change between compiler versions.
+
+  --analyzed-ir-hook <pathname> loads the Scheme file at <pathname> and calls
+    the procedure it defines under the name `hook` with the same datum
+    --analyzed-ir writes, and with the target directory as a string.  The
+    compiler writes no analyzed-ir.sexp in this mode: the hook decides what
+    to do with the datum, so a consumer can render it in the encoding its
+    own tools want.  The datum is ordinary data, so the file needs no import
+    from the compiler.
