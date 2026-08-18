@@ -23,19 +23,8 @@
   (definitions
     (define (fail what x) (internal-errorf 'save-analyzed-ir "unsupported ~a: ~s" what x))
 
-    ;; An id prints as the compiler prints it, as a symbol so it reads back.
-    ;; The number is this pass's own: id-uniq is assigned on first print from
-    ;; a counter the whole compiler shares, so printing anything earlier, as
-    ;; --trace-passes does, would renumber this file.
-    (define id-number (make-eq-hashtable))
-    (define next-id-number 0)
-    (define (id->sym i)
-      (let ([n (or (hashtable-ref id-number i #f)
-                   (let ([n next-id-number])
-                     (hashtable-set! id-number i n)
-                     (set! next-id-number (+ n 1))
-                     n))])
-        (string->symbol (format "~a~s.~s" (id-prefix) (id-sym i) n))))
+    ;; An id prints as the compiler prints it; make it a symbol so it reads back.
+    (define (id->sym i) (string->symbol (format "~a" i)))
 
     ;; A generic native takes one type argument before its values, for each
     ;; distinct type parameter in its declaration. The declaration lists the
@@ -61,6 +50,7 @@
     ;; artifact wants it, so the pass does not restate them.
     (define (Ftype ftype) (unparse-Lloweredemit ftype))
     (define (Type type) (unparse-Lloweredemit type))
+    (define (Arg arg) (unparse-Lloweredemit arg))
 
     ;; ------------------------------------------------------------------
     ;; Expanded VM instructions, in the ledger DSL's notation.
@@ -158,9 +148,6 @@
     [(fref ,src ,function-name) `(fref ,(id->sym function-name))]
     [(circuit ,src (,arg* ...) ,type ,expr)
      `(circuit ,(map Arg arg*) ,(Type type) ,(Expr expr))])
-
-  (Arg : Argument (arg) -> * (sexp)
-    [(,var-name ,type) `(,(id->sym var-name) ,(Type type))])
 
   (Expr : Expression (expr) -> * (sexp)
     [(quote ,src ,datum) `(quote ,datum)]
