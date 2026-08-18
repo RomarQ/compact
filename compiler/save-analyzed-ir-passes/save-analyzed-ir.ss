@@ -20,5 +20,7 @@
     ;; Parentheses only: brackets are a Chez pretty-printing style, and a
     ;; non-Scheme reader should not need to treat them as paren synonyms.
     (parameterize ([print-brackets #f])
-      (pretty-print (extract-analyzed-ir ir proof-circuit-name*) op)))
+      (pretty-print
+        (unparse-Lanalyzed (extract-analyzed-ir ir proof-circuit-name*))
+        op)))
   ir)

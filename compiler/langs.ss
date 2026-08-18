@@ -41,6 +41,7 @@
           Lnodisclose unparse-Lnodisclose Lnodisclose-pretty-formats
           Lnoserialize unparse-Lnoserialize Lnoserialize-pretty-formats
           Lloweredemit unparse-Lloweredemit Lloweredemit-pretty-formats Lloweredemit-Export-Type-Definition?
+          Lanalyzed unparse-Lanalyzed Lanalyzed-pretty-formats
           Ltypescript unparse-Ltypescript Ltypescript-pretty-formats Ltypescript-ADT-Op? Ltypescript-ADT-Runtime-Op?
           Lposttypescript unparse-Lposttypescript Lposttypescript-pretty-formats
           Lnoenums unparse-Lnoenums Lnoenums-pretty-formats
@@ -500,6 +501,18 @@
       (lambda (x p wr)
         (fprintf p "~a~s.~s" (id-prefix) (id-sym x) (id-uniq x)))))
 
+  (define (artifact-sexp? x)
+    (or (null? x)
+        (boolean? x)
+        (number? x)
+        (symbol? x)
+        (string? x)
+        (bytevector? x)
+        (id? x)
+        (and (pair? x)
+             (artifact-sexp? (car x))
+             (artifact-sexp? (cdr x)))))
+
   (define-language/pretty Lexpanded (extends Lpreexpand)
     (terminals
       (+ (len (len)))
@@ -916,6 +929,104 @@
       (- (emit src type len expr))
       (+ (emit src event-version event-tag len expr vm-code) =>
            (emit event-version event-tag expr))))
+
+  (define-language/pretty Lanalyzed (extends Lloweredemit)
+    (terminals
+      (- (boolean (pure-dcl nominal))
+         (string (mesg opaque-type file discloses sugar)))
+      (+ (boolean (pure-dcl nominal exported-flag pure-flag proof-flag))
+         (string (mesg opaque-type file discloses sugar compiler-version-value language-version-value runtime-version-value native-function))
+         (artifact-sexp (artifact-sexp artifact-sexp*))))
+    (Program (p)
+      (- (program src (contract-type* ...) ((export-name* name*) ...) pelt* ...))
+      (+ (analyzed-ir compiler-version-value language-version-value runtime-version-value (artifact-sexp* ...) (type* ...) pelt* ...) =>
+           (analyzed-ir
+             (compiler-version compiler-version-value)
+             (language-version language-version-value)
+             (runtime-version runtime-version-value)
+             (exports artifact-sexp* ...)
+             (contract-types type* ...)
+             pelt* ...)))
+    (Circuit-Definition (cdefn)
+      (- (circuit src function-name (arg* ...) type expr))
+      (+ (circuit src function-name exported-flag pure-flag proof-flag (arg* ...) type expr) =>
+           (circuit function-name
+             (exported exported-flag)
+             (pure pure-flag)
+             (proof proof-flag)
+             (arg* ...)
+             type
+             expr)))
+    (Native-Declaration (ndecl)
+      (- (native src function-name native-entry (arg* ...) type))
+      (+ (native src function-name native-function artifact-sexp (type* ...) (arg* ...) type) =>
+           (native function-name
+             (entry native-function artifact-sexp)
+             (type-arguments type* ...)
+             (arg* ...)
+             type)))
+    (Public-Ledger-Binding (public-binding)
+      (- (src ledger-field-name (path-index* ...) type))
+      (+ (src ledger-field-name (path-index* ...) exported-flag type) =>
+           (ledger-field-name
+             (path-index* ...)
+             (exported exported-flag)
+             type)))
+    (Public-Ledger-Array (pl-array)
+      (- (public-ledger-array pl-array-elt ...))
+      (+ (public-ledger-array pl-array-elt ...) =>
+           (public-ledger-array pl-array-elt ...)))
+    (Tuple-Argument (tuple-arg)
+      (- (single src expr))
+      (+ (single src expr) => (single expr)))
+    (Map-Argument (map-arg)
+      (- (expr type type^))
+      (+ (expr type type^) => (expr type type^)))
+    (Function (fun)
+      (- (fref src function-name))
+      (+ (fref src function-name) => (fref function-name)))
+    (Expression (expr index)
+      (- (quote src datum)
+         (var-ref src var-name)
+         (tuple-slice src type expr kindex len)
+         (vector-ref src type expr index)
+         (vector-slice src type expr index len)
+         (bytes-ref src type expr index)
+         (bytes-slice src type expr index len)
+         (< src bits expr1 expr2)
+         (<= src bits expr1 expr2)
+         (> src bits expr1 expr2)
+         (>= src bits expr1 expr2)
+         (== src type expr1 expr2)
+         (!= src type expr1 expr2)
+         (map src len fun map-arg map-arg* ...)
+         (fold src len fun (expr0 type0) map-arg map-arg* ...)
+         (emit src event-version event-tag len expr vm-code)
+         (public-ledger src ledger-field-name (maybe sugar) (path-elt ...) src^ adt-op expr* ...)
+         (return src expr))
+      (+ (quote src datum) => (quote datum)
+         (var-ref src var-name) => (var-ref var-name)
+         (tuple-slice src type expr kindex len) => (tuple-slice type expr kindex len)
+         (vector-ref src type expr index) => (vector-ref type expr index)
+         (vector-slice src type expr index len) => (vector-slice type expr index len)
+         (bytes-ref src type expr index) => (bytes-ref type expr index)
+         (bytes-slice src type expr index len) => (bytes-slice type expr index len)
+         (< src bits expr1 expr2) => (< bits expr1 expr2)
+         (<= src bits expr1 expr2) => (<= bits expr1 expr2)
+         (> src bits expr1 expr2) => (> bits expr1 expr2)
+         (>= src bits expr1 expr2) => (>= bits expr1 expr2)
+         (== src type expr1 expr2) => (== type expr1 expr2)
+         (!= src type expr1 expr2) => (!= type expr1 expr2)
+         (map src len fun map-arg map-arg* ...) => (map len fun map-arg map-arg* ...)
+         (fold src len fun (expr0 type0) map-arg map-arg* ...) =>
+           (fold len fun (expr0 type0) map-arg map-arg* ...)
+         (emit src event-version event-tag len expr (artifact-sexp* ...)) =>
+           (emit event-version event-tag len expr (instructions artifact-sexp* ...))
+         (public-ledger src ledger-field-name op-class (path-elt* ...) ledger-op type (artifact-sexp* ...) expr* ...) =>
+           (public-ledger ledger-field-name op-class (path-elt* ...) ledger-op type
+             (instructions artifact-sexp* ...)
+             expr* ...)
+         (return src expr) => (return expr))))
 
   (define-language/pretty Ltypescript (extends Lloweredemit)
     (terminals
