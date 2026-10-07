@@ -191,6 +191,30 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.image-name.outputs.commit }}
+          persist-credentials: false
+
+      # A full compile hashes each verifier key with sha256sum and downloads the
+      # public parameters over HTTPS into a cold cache, so it fails on an image
+      # without coreutils on the PATH or without a CA store. The caller's uid
+      # has no home in the image, so the cache is a mount.
+      - name: The compactc of this architecture compiles a contract with keys
+        env:
+          PARAMS: ${{ runner.temp }}/zk-params
+        run: |
+          mkdir -p "$PARAMS"
+          docker run --rm --platform 'linux/${{ matrix.arch }}' --user "$(id -u):$(id -g)" \
+            -v "$PWD:$PWD" -w "$PWD" -v "$PARAMS:/zk-params" -e MIDNIGHT_PP=/zk-params \
+            "$IMAGE" 'compactc --analyzed-ir examples/counter.compact compiled/counter'
+          for f in compiled/counter/compiler/analyzed-ir.sexp compiled/counter/keys/increment.verifier; do
+            if [ ! -s "$f" ]; then
+              echo "The compile wrote no $f."
+              exit 1
+            fi
+          done
+
       - name: The image pulls with no login
         run: |
           docker logout ghcr.io

@@ -412,11 +412,16 @@
               entrypoint = [ "${bashInteractive}/bin/bash" "-c" ];
               Cmd = [ "${compactc}/bin/compactc" ];
               Env = [
+                # compactc hashes each verifier key with sha256sum when it has
+                # no libcrypto, so coreutils must be on the PATH.
                 "PATH=${pkgs.lib.makeBinPath [
                   compactc
                   zkir.packages.${system}.zkir
                   zkir-v3-bin
+                  coreutils
                 ]}"
+                # Key generation downloads the public parameters over HTTPS.
+                "SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt"
               ];
             };
             layers = [
@@ -425,6 +430,8 @@
                   compactc
                   zkir.packages.${system}.zkir
                   zkir-v3-bin
+                  coreutils
+                  cacert
                 ];
               })
             ];
