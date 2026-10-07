@@ -1,0 +1,201 @@
+name: Compiler image
+
+# Publishes the compactc of one commit as one multi-arch image,
+# ghcr.io/<owner>/compactc:<commit>, so that a contract compile needs Docker
+# and not a cold Nix build of this fork. midnight-rs pins a commit of this fork
+# as a submodule, and its tools/compactc-docker runs the image of that commit.
+#
+# The tag is the full commit SHA. The image's own tag is the compiler version,
+# which stays the same across fork commits.
+#
+# A push to midnight-rs publishes the image of the new head. A
+# manual run publishes the image of the `commit` input, such as a midnight-rs
+# pin that no branch head points to; a manual run needs this file on the
+# default branch. A run for a commit whose image exists builds nothing, and
+# only verifies the image.
+
+on:
+  push:
+    branches: [midnight-rs]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The full SHA of the commit to build (default the commit of the run)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  image-name:
+    name: Name the image and look it up
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      commit: ${{ steps.name.outputs.commit }}
+      image: ${{ steps.name.outputs.image }}
+      exists: ${{ steps.lookup.outputs.exists }}
+    steps:
+      # ghcr refuses an upper-case repository name.
+      - id: name
+        env:
+          COMMIT: ${{ inputs.commit || github.sha }}
+        run: |
+          if ! grep -qE '^[0-9a-f]{40}$' <<<"$COMMIT"; then
+            echo "The commit input must be a full 40-character SHA, not '$COMMIT'."
+            exit 1
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/compactc:$COMMIT" >> "$GITHUB_OUTPUT"
+
+      # The login lets the lookup see the image while the package is private.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ghcr can answer a package that does not exist yet with "denied", not
+      # with "manifest unknown", so every failure counts as no image. A wrong
+      # answer costs one rebuild of the same tag.
+      - id: lookup
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+        run: |
+          if docker manifest inspect "$IMAGE" >/dev/null; then
+            echo "$IMAGE exists. This run only verifies it."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The manifest job needs this one, so it skips when this one skips.
+  build:
+    name: Build and push (${{ matrix.arch }})
+    needs: image-name
+    if: needs.image-name.outputs.exists != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      IMAGE: ${{ needs.image-name.outputs.image }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.image-name.outputs.commit }}
+          persist-credentials: false
+
+      # The runner image ships about 14 GB free, and a cold Nix build of the
+      # compiler and its toolchain needs more.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      # The flake declares this substituter. The compiler's dependencies come
+      # from it; this fork's compactc is built here, because a fork's
+      # derivation never matches an upstream cache entry.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            accept-flake-config = true
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the image
+        run: nix build .#compactc-oci
+
+      # copyToRegistry pushes to the image's own name and tag, compactc:<version>.
+      # copyTo takes the destination, and its skopeo reads the login above from
+      # ~/.docker/config.json.
+      - name: Push the image
+        run: nix run .#compactc-oci.copyTo -- "docker://$IMAGE"
+
+  manifest:
+    name: Join the architectures in one tag
+    needs: [image-name, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    env:
+      IMAGE: ${{ needs.image-name.outputs.image }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - run: docker buildx imagetools create --tag "$IMAGE" "$IMAGE-amd64" "$IMAGE-arm64"
+
+  verify:
+    name: Verify the published image (${{ matrix.arch }})
+    needs: [image-name, manifest]
+    # This job also runs when the image exists, so a new run checks a tag that
+    # an earlier run pushed. A skipped need skips a job whose `if` has no
+    # status function.
+    if: ${{ !cancelled() && needs.image-name.result == 'success' && (needs.image-name.outputs.exists == 'true' || needs.manifest.result == 'success') }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.image-name.outputs.image }}
+    steps:
+      # The login lets the image checks run while the package is private. The
+      # last step checks the pull with no login that users do.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fails on a manifest list without this architecture, or on an image
+      # built from another flake output, such as upstream compactc.
+      - name: The compactc of this architecture takes --analyzed-ir
+        run: |
+          help="$(docker run --rm --platform 'linux/${{ matrix.arch }}' "$IMAGE" 'compactc --help')"
+          if ! grep -q -- --analyzed-ir <<<"$help"; then
+            echo "$help"
+            echo "The compactc in $IMAGE does not take --analyzed-ir."
+            exit 1
+          fi
+
+      - name: The image pulls with no login
+        run: |
+          docker logout ghcr.io
+          if ! docker pull --platform 'linux/${{ matrix.arch }}' "$IMAGE"; then
+            echo "The pull of $IMAGE with no login failed."
+            echo "Make the compactc package on ghcr.io public (package settings, Change visibility). Then run this workflow again."
+            exit 1
+          fi
