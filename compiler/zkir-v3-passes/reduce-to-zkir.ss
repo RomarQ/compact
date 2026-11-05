@@ -114,6 +114,44 @@
                         (cons atom new-alignment*)
                         (cons (car triv*) new-triv*))])))))
 
+    ;; Instructions that set `var-name` to the default value of the native ZKIR type `zkir-type`,
+    ;; consed onto `instr*`.
+    (define (native-default zkir-type var-name instr*)
+      (with-output-language (Lzkir Instruction)
+        ;; Emit instructions for a default value for a 32-byte field, by casting
+        ;; a literal (Scalar<BLS12-381>) field 0 to Bytes<32> and then casting
+        ;; that to the target field type.
+        (define (emit-field-default zkir-type var instr*)
+          (let* ([tmp (make-temp-id default-src 'tmp)])
+            (cons*
+                `(from_bytes ,zkir-type ,var ,tmp)
+                `(to_bytes ,tmp 0)
+                instr*)))
+        (case zkir-type
+          [("JubjubPoint") (cons `(from_coordinates ,var-name 0 1) instr*)]
+
+          [("Curve25519Base") (emit-field-default "Base<Curve25519>" var-name instr*)]
+          [("Curve25519Scalar") (emit-field-default "Scalar<Curve25519>" var-name instr*)]
+          [("Curve25519Point")
+           (let ([tmp (make-temp-id default-src 'tmp)])
+             (cons `(ec_mul_generator ,var-name ,tmp)
+               (emit-field-default "Scalar<Curve25519>" tmp instr*)))]
+
+          [("Secp256k1Base") (emit-field-default "Base<Secp256k1>" var-name instr*)]
+          [("Secp256k1Scalar") (emit-field-default "Scalar<Secp256k1>" var-name instr*)]
+          [("Secp256k1Point")
+           (let ([tmp (make-temp-id default-src 'tmp)])
+             (cons `(ec_mul_generator ,var-name ,tmp)
+               (emit-field-default "Scalar<Secp256k1>" tmp instr*)))]
+
+          [("Secp256r1Base") (emit-field-default "Base<Secp256r1>" var-name instr*)]
+          [("Secp256r1Scalar") (emit-field-default "Scalar<Secp256r1>" var-name instr*)]
+          [("Secp256r1Point")
+           (let ([tmp (make-temp-id default-src 'tmp)])
+             (cons `(ec_mul_generator ,var-name ,tmp)
+               (emit-field-default "Scalar<Secp256r1>" tmp instr*)))]
+          [else (assert cannot-happen)])))
+
     (define (make-private-input test var-name primitive-type)
       ;; The ZKIR v2 backend has this special case for literal true guards.
       (with-output-language (Lzkir Instruction)
@@ -339,6 +377,32 @@
                           0 alignment*)])
              (values count alignment*))]))
 
+      ;; The default value of an Lflattened type as a zkir-val. A native atom gets the value
+      ;; that `native-default` builds, except a JubjubScalar, whose default is the field 0.
+      (define (default-zkir-val type)
+        (nanopass-case (Lflattened Type) type
+          [(ty (,alignment* ...) (,primitive-type* ...))
+           (make-zkir-val primitive-type* alignment*
+             (apply append
+               (maplr
+                 (lambda (atom)
+                   (nanopass-case (Lflattened Alignment) atom
+                     [(anative ,zkir-type) (guard (not (string=? zkir-type "JubjubScalar")))
+                      (let ([var (make-temp-id default-src 'default)])
+                        (zkir-instr* (native-default zkir-type var (zkir-instr*)))
+                        (list var))]
+                     [(abytes ,nat) (make-list (ceiling (/ nat (field-bytes))) 0)]
+                     [else (list 0)]))
+                 alignment*)))]))
+
+      ;; The ledger alignment of an Lflattened type: each native atom becomes the atoms that
+      ;; `circuit-alignment-for` encodes it in.
+      (define (ledger-alignment type)
+        (let-values ([(count alignment*) (default-for type)])
+          (let-values ([(alignment* triv* instr*)
+                        (circuit-alignment-for default-src alignment* (make-list count 0) '())])
+            alignment*)))
+
       ;; Operands can be one of:
       ;;   - zkir-val, typed Lzkir outputs consisting of a list of
       ;;     alignment atoms and a list of instruction outputs
@@ -383,19 +447,13 @@
                          (if (zero? i)
                              (outer (cdr op*) (+ count len) alignment* (append var* tail))
                              (inner (1- i) (cdr tail) (cons (car tail) alignment*))))))))]
-            [(VMnull type)
-             (let-values ([(count alignment*) (default-for type)])
-               ;; Encoding in code* is in reversed order.
-               (append (make-list count 0)
-                 (map assemble-alignment-atom (reverse alignment*))
-                 (cons (length alignment*) code*)))]
+            [(VMnull type) (assemble-operand-acc code* (default-zkir-val type))]
             [(VMmax-sizeof type)
              ;; There's room to tighten this in the future, we just need to be careful to keep it
              ;; in sync with the Rust version.
              ;; This code is a version of the ZKIR v2 implementation, simplified by standard
              ;; call-by-value reasoning.
-             (nanopass-case (Lflattened Type) type
-               [(ty (,alignment* ...) (,primitive-type* ...))
+             (let ([alignment* (ledger-alignment type)])
                 (cons (if (null? alignment*)
                           2
                           (fold-left
@@ -409,7 +467,7 @@
                                   [else 34])))
                             (1+ (ceiling (/ (integer-length (length alignment*)) 8)))
                             alignment*))
-                  code*)])]
+                  code*))]
             [(VMvalue->int x)
              (let ([var* (zkir-val-input* x)])
                (assert (and (list? var*) (= 1 (length var*))))
@@ -449,8 +507,8 @@
                      [(VMop? val)
                       (VMop-case val
                         [(VMnull type)
-                         (let-values ([(count alignment*) (default-for type)])
-                           (values (make-list count 0) alignment*))]
+                         (let ([val (default-zkir-val type)])
+                           (values (zkir-val-input* val) (zkir-val-alignment* val)))]
                         [else (assert cannot-happen)])]
                      [else (assert cannot-happen)])])
                (let-values ([(sep-val sep-length) (domain-separator "mdn:lh")])
@@ -855,36 +913,7 @@
                        (cons 'emit-payload (make-zkir-val payload-primitive-type* payload-alignment* triv*)))])
        (assemble test '() '() '() src '() env vm-code instr*))]
     [(= ,test (,var-name) (default ,zkir-type))
-     (with-output-language (Lzkir Instruction)
-       ;; Emit instructions for a default value for a 32-byte field, by casting
-       ;; a literal (Scalar<BLS12-381>) field 0 to Bytes<32> and then casting
-       ;; that to the target field type.
-       (define (emit-field-default zkir-type var instr*)
-         (let* ([tmp (make-temp-id default-src 'tmp)])
-           (cons*
-               `(from_bytes ,zkir-type ,var ,tmp)
-               `(to_bytes ,tmp 0)
-               instr*)))
-       (case zkir-type
-         [("JubjubPoint") (cons `(from_coordinates ,var-name 0 1) instr*)]
-
-         [("Curve25519Base" "Curve25519Scalar" "Curve25519Point")
-          (assert not-implemented)]
-
-         [("Secp256k1Base") (emit-field-default "Base<Secp256k1>" var-name instr*)]
-         [("Secp256k1Scalar") (emit-field-default "Scalar<Secp256k1>" var-name instr*)]
-         [("Secp256k1Point")
-          (let ([tmp (make-temp-id default-src 'tmp)])
-            (cons `(ec_mul_generator ,var-name ,tmp)
-              (emit-field-default "Scalar<Secp256k1>" tmp instr*)))]
-
-         [("Secp256r1Base") (emit-field-default "Base<Secp256r1>" var-name instr*)]
-         [("Secp256r1Scalar") (emit-field-default "Scalar<Secp256r1>" var-name instr*)]
-         [("Secp256r1Point")
-          (let ([tmp (make-temp-id default-src 'tmp)])
-            (cons `(ec_mul_generator ,var-name ,tmp)
-              (emit-field-default "Scalar<Secp256r1>" tmp instr*)))]
-         [else (assert cannot-happen)]))]
+     (native-default zkir-type var-name instr*)]
     [(= ,test (,var-name0 ,var-name1) (field->bytes ,src ,len ,ftype ,triv))
      (with-output-language (Lzkir Instruction)
        ;; Handle a 24-byte low / 8-byte high field encoding.

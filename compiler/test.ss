@@ -84304,6 +84304,63 @@ groups than for single tests.
       message: "~a:\n  ~?"
       irritants: '("<standard library>" "expected ~a type to be an ordinary Compact type but received ADT type ~a" ("circuit return" "Map<Boolean, Set<Boolean>>")))
     )
+
+  ; Issue #857: a ledger operation that uses the default of a native curve type.
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export ledger point: JubjubPoint;"
+      "export ledger points: List<JubjubPoint>;"
+      "export ledger point_map: Map<Field, JubjubPoint>;"
+      "export ledger point_tree: MerkleTree<4, JubjubPoint>;"
+      "export ledger secp_points: List<Secp256k1Point>;"
+      "export ledger curve_points: List<Curve25519Point>;"
+      "export circuit reset(): [] { point.resetToDefault(); }"
+      "export circuit hasHead(): Boolean { return points.head().is_some; }"
+      "export circuit insert(k: Field): [] { point_map.insertDefault(disclose(k)); }"
+      "export circuit insertLeaf(): [] { point_tree.insertIndexDefault(0); }"
+      "export circuit secpHead(): Maybe<Secp256k1Point> { return secp_points.head(); }"
+      "export circuit curveHead(): Maybe<Curve25519Point> { return curve_points.head(); }"
+      )
+    (succeeds)
+    )
+
+  ; Issue #857: the default of a native type is its ZKIR default, and the size bound of a value
+  ; with a native type counts the atoms that encode it.
+  (test
+    '(
+      "import CompactStandardLibrary;"
+      "export ledger points: List<JubjubPoint>;"
+      "export circuit head(): Maybe<JubjubPoint> {"
+      "  return points.head();"
+      "}"
+      )
+    (pass-returns reduce-to-zkir
+      (program
+        (circuit (head) ()
+          ("Scalar<BLS12-381>" "Point<Jubjub>")
+          (public_input "Scalar<BLS12-381>" %t.0)
+          (public_input "Point<Jubjub>" %t.1)
+          (encode (%pt.2 %pt.3) %t.1)
+          (from_coordinates %default.4 0 1)
+          (encode (%pt.5 %pt.6) %default.4)
+          (impact 1 48)
+          (impact 1 80 1 1 0)
+          (impact 1 80 1 1 0)
+          (impact 1 48)
+          (impact 1 3)
+          (impact 1 16 1 1 1 1)
+          (impact 1 2)
+          (impact 1 18 4)
+          (impact 1 16 1 1 1 1)
+          (impact 1 64)
+          (impact 1 22 72)
+          (impact 1 19 2)
+          (impact 1 11)
+          (impact 1 16 1 3 1 -2 -2 0 %pt.5 %pt.6)
+          (impact 1 13 3 1 -2 -2 %t.0 %pt.2 %pt.3)
+          (output %t.0 %t.1))))
+    )
 )
 
 ;; The version header of analyzed-ir.sexp, as the pass prints it. pretty-print
